@@ -1,0 +1,1 @@
+-- Seed data will be added with the event model. Stage 1 has no application tables.
