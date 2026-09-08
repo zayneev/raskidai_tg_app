@@ -411,3 +411,10 @@ enabled = true
 # declarative_schema_path = "./schemas"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# Custom opaque sessions: each handler performs its own authentication.
+[functions.telegram-auth]
+verify_jwt = false
+
+[functions.session]
+verify_jwt = false

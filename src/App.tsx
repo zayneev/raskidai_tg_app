@@ -1,6 +1,8 @@
 import { useState } from "react";
+import { useAuth } from "./auth";
 
 export function App() {
+  const { state, retry, logout } = useAuth();
   const [showDetails, setShowDetails] = useState(false);
 
   return (
@@ -12,7 +14,7 @@ export function App() {
           </span>
           раскидай
         </a>
-        <span className="badge">Скоро в Telegram</span>
+        <span className="badge">Telegram Mini App</span>
       </header>
 
       <section className="hero" aria-labelledby="hero-title">
@@ -47,13 +49,55 @@ export function App() {
           <span className="bubble bubble-three">Домик 🏡</span>
         </div>
 
-        <div className="notice">
+        <div className="notice" role="status" aria-live="polite">
           <span className="dot" aria-hidden="true" />
           <div>
-            <strong>Готовим первое мероприятие</strong>
-            <p>
-              Приложение в разработке. Создание мероприятий появится чуть позже.
-            </p>
+            {state.status === "loading" && <strong>Проверяем вход…</strong>}
+            {state.status === "outside" && (
+              <>
+                <strong>Откройте Раскидай в Telegram</strong>
+                <p>
+                  Для входа запустите мини-приложение через кнопку в профиле или
+                  меню бота.
+                </p>
+              </>
+            )}
+            {state.status === "unconfigured" && (
+              <>
+                <strong>Вход скоро появится</strong>
+                <p>Подключаем сервер. Попробуйте открыть приложение позже.</p>
+              </>
+            )}
+            {state.status === "authenticated" && (
+              <>
+                <strong>Привет, {state.session.user.displayName}!</strong>
+                <p>
+                  Вход через Telegram подтверждён. Создание мероприятий появится
+                  на следующем этапе.
+                </p>
+                <button className="auth-button" onClick={() => void logout()}>
+                  Выйти
+                </button>
+              </>
+            )}
+            {state.status === "error" && (
+              <>
+                <strong>Не удалось войти</strong>
+                <p>{state.message}</p>
+                <button className="auth-button" onClick={retry}>
+                  Повторить
+                </button>
+              </>
+            )}
+            {state.status === "signed-out" && (
+              <>
+                <strong>Вы вышли</strong>
+                <p>Сессия завершена.</p>
+                <button className="auth-button" onClick={retry}>
+                  Войти через Telegram
+                </button>
+              </>
+            )}
           </div>
         </div>
         <button

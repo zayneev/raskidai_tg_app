@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noUnusedLocals": true },
+  "include": [
+    "supabase/functions/_shared/auth.ts",
+    "supabase/functions/_shared/handler.ts",
+    "tests/**/*.ts"
+  ]
+}

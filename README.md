@@ -4,11 +4,14 @@ Telegram Mini App для разделения расходов на меропр
 
 ## Текущий этап
 
-Подготовлен каркас React + TypeScript + Vite, стартовый адаптивный экран,
-проверка типов, сборка, CI и ручной workflow публикации на GitHub Pages.
-Supabase инициализирован для дальнейшей разработки Edge Functions и миграций.
-Авторизация, мероприятия, расходы и расчёты пока не реализованы.
-Стартовый экран не выдаёт демонстрационные данные за реальные.
+Этап 1 выполнен. Для этапа 2 реализованы Telegram-вход, проверка подписи и
+свежести initData, серверные сессии, таблица users и запрет прямого доступа к БД.
+Есть состояния входа, ошибки, повторной попытки и выхода. Мероприятия, расходы
+и расчёты пока не реализованы.
+
+Подключение бота, deployment и приёмка реального входа описаны в
+[docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md). До проверки на стенде этап 2
+не считается завершённым.
 
 ## Локальный запуск
 
@@ -25,19 +28,21 @@ pnpm dev
 Если в установленном Node.js нет Corepack, установите pnpm по https://pnpm.io/installation.
 
 ```sh
+pnpm test
 pnpm typecheck
 pnpm build
 pnpm preview
 ```
 
 Production preview: http://localhost:4173/raskidai_tg_app/.
-Для этапа 1 переменные окружения и Telegram не нужны.
+Для просмотра стартового экрана переменные окружения и Telegram не нужны.
+Для входа нужен настроенный backend и запуск через Telegram.
 
 ## Структура
 
 - `src/` — интерфейс Mini App.
-- `supabase/functions/` — будущая серверная логика на TypeScript/Deno.
-- `supabase/migrations/` — будущие версионированные SQL-миграции.
+- `supabase/functions/` — серверная логика входа и сессий на TypeScript/Deno.
+- `supabase/migrations/` — версионированные SQL-миграции.
 - `supabase/config.toml` — конфигурация локального Supabase.
 - `docs/PLAN.md` — согласованные правила, архитектура и этапы.
 - `.github/workflows/` — проверка сборки и публикация.
@@ -48,7 +53,7 @@ Production preview: http://localhost:4173/raskidai_tg_app/.
 Всё с префиксом `VITE_` попадает в общедоступный браузерный код.
 Токен бота и Supabase secret/service-role key хранятся только в секретах
 Edge Functions; локально — в игнорируемом `supabase/.env`.
-На этом этапе реальные секреты не нужны и подключения к облачной БД нет.
+Для проверки реального входа нужны серверный токен бота и подключённый Supabase.
 
 Для локального Supabase нужен запущенный Docker:
 
@@ -58,8 +63,10 @@ pnpm exec supabase status
 pnpm exec supabase stop
 ```
 
-Миграции добавляем вместе с функциями на следующих этапах. Схема запланирована
-в `docs/PLAN.md`; пустые каталоги не означают готовую базу данных.
+Первая миграция создаёт users, app_sessions и серверные RPC.
+После запуска Supabase примените её через `pnpm exec supabase migration up`,
+затем выполните `pnpm exec supabase test db`. Остальные сущности добавляются
+по этапам из `docs/PLAN.md`.
 
 ## Публикация
 
