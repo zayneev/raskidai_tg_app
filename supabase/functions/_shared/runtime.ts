@@ -1,6 +1,7 @@
+import { createEventsHandler } from "./events.ts";
 import { createHandler, type Rpc } from "./handler.ts";
 
-export function serve(kind: "telegram-auth" | "session") {
+export function serve(kind: "telegram-auth" | "session" | "events") {
   const required = (name: string) => {
     const value = Deno.env.get(name);
     if (!value) throw new Error(`Missing ${name}`);
@@ -24,14 +25,17 @@ export function serve(kind: "telegram-auth" | "session") {
     const body = await response.text();
     return body ? JSON.parse(body) : null;
   };
+  const options = {
+    botToken: kind === "telegram-auth" ? required("TELEGRAM_BOT_TOKEN") : "",
+    allowedOrigins: required("ALLOWED_ORIGINS")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    rpc,
+  };
   Deno.serve(
-    createHandler(kind, {
-      botToken: required("TELEGRAM_BOT_TOKEN"),
-      allowedOrigins: required("ALLOWED_ORIGINS")
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean),
-      rpc,
-    }),
+    kind === "events"
+      ? createEventsHandler(options)
+      : createHandler(kind, options),
   );
 }

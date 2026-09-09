@@ -4,6 +4,7 @@
   "include": [
     "supabase/functions/_shared/auth.ts",
     "supabase/functions/_shared/handler.ts",
+    "supabase/functions/_shared/events.ts",
     "tests/**/*.ts"
   ]
 }

@@ -1,9 +1,20 @@
 import { useState } from "react";
 import { useAuth } from "./auth";
+import { Events } from "./Events";
 
 export function App() {
   const { state, retry, logout } = useAuth();
   const [showDetails, setShowDetails] = useState(false);
+
+  if (state.status === "authenticated")
+    return (
+      <Events
+        token={state.session.token}
+        userId={state.session.user.id}
+        displayName={state.session.user.displayName}
+        logout={logout}
+      />
+    );
 
   return (
     <main className="app">
@@ -66,18 +77,6 @@ export function App() {
               <>
                 <strong>Вход скоро появится</strong>
                 <p>Подключаем сервер. Попробуйте открыть приложение позже.</p>
-              </>
-            )}
-            {state.status === "authenticated" && (
-              <>
-                <strong>Привет, {state.session.user.displayName}!</strong>
-                <p>
-                  Вход через Telegram подтверждён. Создание мероприятий появится
-                  на следующем этапе.
-                </p>
-                <button className="auth-button" onClick={() => void logout()}>
-                  Выйти
-                </button>
               </>
             )}
             {state.status === "error" && (

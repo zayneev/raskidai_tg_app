@@ -20,7 +20,7 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - run: deno check supabase/functions/telegram-auth/index.ts supabase/functions/session/index.ts
+      - run: deno check supabase/functions/telegram-auth/index.ts supabase/functions/session/index.ts supabase/functions/events/index.ts
 
   database:
     runs-on: ubuntu-latest

@@ -418,3 +418,6 @@ verify_jwt = false
 
 [functions.session]
 verify_jwt = false
+
+[functions.events]
+verify_jwt = false
