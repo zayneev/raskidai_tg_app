@@ -1,3 +1,4 @@
+import { Expenses } from "./Expenses";
 import { useEffect, useRef, useState } from "react";
 import {
   eventRequest,
@@ -417,9 +418,12 @@ export function Events({
               </div>
             </section>
           )}
-          <p className="muted">
-            Добавление расходов появится на следующем этапе.
-          </p>
+          <Expenses
+            key={event.id}
+            token={token}
+            userId={userId}
+            event={event}
+          />
         </>
       )}
       <footer>Меньше подсчётов. Больше хороших встреч.</footer>

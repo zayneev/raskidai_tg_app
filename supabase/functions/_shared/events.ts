@@ -10,6 +10,8 @@ const statuses: Record<string, number> = {
   event_full: 409,
   creator_cannot_leave: 409,
   member_has_expenses: 409,
+  version_conflict: 409,
+  request_conflict: 409,
   invalid_input: 400,
   invalid_action: 400,
 };
@@ -81,6 +83,11 @@ export function createEventsHandler(options: {
           "rotate",
           "disable",
           "leave",
+          "expenses.list",
+          "expenses.history",
+          "expenses.create",
+          "expenses.update",
+          "expenses.delete",
         ].includes(action)
       )
         throw new HttpError(400, "invalid_action");
@@ -100,6 +107,19 @@ export function createEventsHandler(options: {
           throw new HttpError(400, "invalid_input");
         data.eventId = body.eventId;
       }
+      const expenseAction = action.startsWith("expenses.");
+      if (expenseAction) {
+        for (const key of [
+          "eventId",
+          "expenseId",
+          "requestId",
+          "version",
+          "title",
+          "amountKopecks",
+          "memberIds",
+        ])
+          if (body[key] !== undefined) data[key] = body[key];
+      }
       let token: string | undefined;
       if (action === "join") {
         if (
@@ -113,11 +133,14 @@ export function createEventsHandler(options: {
         token = newSessionToken();
         data.invitationHash = await sha256(token);
       }
-      const result = (await options.rpc("event_action", {
-        p_token_hash: hash,
-        p_action: action,
-        p_data: data,
-      })) as Record<string, unknown>;
+      const result = (await options.rpc(
+        expenseAction ? "expense_action" : "event_action",
+        {
+          p_token_hash: hash,
+          p_action: expenseAction ? action.slice("expenses.".length) : action,
+          p_data: data,
+        },
+      )) as Record<string, unknown>;
       if (typeof result?.error === "string")
         return respond({ error: result.error }, statuses[result.error] ?? 500);
       return respond(token ? { ...result, invitation: token } : result);

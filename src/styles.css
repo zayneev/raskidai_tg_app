@@ -480,3 +480,37 @@ footer {
     padding: 18px;
   }
 }
+
+.expenses-panel {
+  margin-top: 24px;
+}
+.expense-item {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border, #deded8);
+  overflow-wrap: anywhere;
+}
+.expense-item ul {
+  padding-left: 20px;
+}
+.share-choice {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+.share-choice input {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.expenses-panel fieldset {
+  min-width: 0;
+  border: 1px solid #deded8;
+  border-radius: 12px;
+}
+.expenses-panel summary {
+  cursor: pointer;
+  padding: 20px 0;
+  font-weight: 600;
+}

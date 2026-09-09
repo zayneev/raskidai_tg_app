@@ -14,7 +14,7 @@ export type EventDetails = Omit<EventSummary, "memberCount"> & {
 const messages: Record<string, string> = {
   unauthorized:
     "Сессия истекла. Закройте приложение и откройте его заново из Telegram.",
-  forbidden: "Это действие доступно только создателю.",
+  forbidden: "Можно изменять свои расходы; создатель может изменять любые.",
   not_found: "Мероприятие или приглашение недоступно.",
   invitation_invalid:
     "Ссылка отключена или обновлена. Попросите новую у создателя.",
@@ -22,8 +22,20 @@ const messages: Record<string, string> = {
   event_full: "В мероприятии уже 30 участников.",
   creator_cannot_leave: "Создатель не может покинуть мероприятие.",
   member_has_expenses: "Нельзя выйти: вы связаны с расходами мероприятия.",
+  version_conflict:
+    "Расход уже изменён. Обновите список и откройте форму заново.",
+  request_conflict:
+    "Этот запрос уже выполнен с другими данными. Обновите список.",
   invalid_input: "Проверьте введённые данные.",
 };
+export class EventApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+  }
+}
 export async function eventRequest<T>(
   token: string,
   action: string,
@@ -48,9 +60,10 @@ export async function eventRequest<T>(
   }
   const body = await response.json();
   if (!response.ok)
-    throw new Error(
+    throw new EventApiError(
       messages[body.error] ??
         "Не удалось выполнить действие. Попробуйте ещё раз.",
+      response.status,
     );
   return body as T;
 }

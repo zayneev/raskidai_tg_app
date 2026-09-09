@@ -18,11 +18,12 @@
 
 ## Облачный backend
 
-Создать проект Supabase, затем из корня репозитория:
+Для этого репозитория использовать существующий проект `njzfzgqprgkyrqirkvhe`;
+новый проект не создавать. Из корня репозитория:
 
 ```sh
 pnpm exec supabase login
-pnpm exec supabase link --project-ref YOUR_PROJECT_REF
+pnpm exec supabase link --project-ref njzfzgqprgkyrqirkvhe
 pnpm exec supabase db push
 ```
 
@@ -135,3 +136,13 @@ deno check supabase/functions/telegram-auth/index.ts supabase/functions/session/
 `pnpm exec supabase functions deploy events`.
 Приглашения используют Main Mini App бота; сценарий проверки после публикации
 frontend описан в [EVENTS.md](EVENTS.md).
+
+Frontend этапа 3 опубликован; приглашение и выход проверены пользователем двумя
+Telegram-аккаунтами 09.09.2026. Этап 3 завершён.
+
+## Дополнение этапа 4 (09.09.2026)
+
+В существующем проекте применена миграция expenses; Edge Function events
+обновлена и принимает действия `expenses.*`. Новых функций и секретов нет.
+Сессия и права проверяются внутри `expense_action`. Контракт и приёмка:
+[EXPENSES.md](EXPENSES.md).
