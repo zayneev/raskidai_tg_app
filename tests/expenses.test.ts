@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseRubles, rublesInput, formatMoney } from "../src/money.ts";
+import {
+  parseRubles,
+  rublesInput,
+  formatMoney,
+  formatSignedMoney,
+} from "../src/money.ts";
 import { createEventsHandler } from "../supabase/functions/_shared/events.ts";
 import { sha256 } from "../supabase/functions/_shared/auth.ts";
 test("rubles parsed as exact integer kopecks without rounding", () => {
@@ -26,6 +31,48 @@ test("rubles parsed as exact integer kopecks without rounding", () => {
     assert.equal(parseRubles(input), null);
   assert.equal(rublesInput(101), "1.01");
   assert.equal(formatMoney(101), "1,01 ₽");
+  assert.equal(formatSignedMoney(350000), "+3 500,00 ₽");
+  assert.equal(formatSignedMoney(-1), "−0,01 ₽");
+  assert.equal(formatSignedMoney(0), "0,00 ₽");
+});
+
+test("settlement HTTP routes exact allowed fields and strips forged result", async () => {
+  const token = "a".repeat(64);
+  for (const action of ["get", "settle", "cancel"]) {
+    const expected = {
+      eventId: "00000000-0000-4000-8000-000000000001",
+      requestId: "00000000-0000-4000-8000-000000000002",
+      eventVersion: 7,
+    };
+    const handler = createEventsHandler({
+      allowedOrigins: [],
+      rpc: async (name, args) => {
+        assert.equal(name, "settlement_action");
+        assert.equal(args.p_action, action);
+        assert.deepEqual(args.p_data, expected);
+        return { ok: true };
+      },
+    });
+    const response = await handler(
+      new Request("https://test/events", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: `settlements.${action}`,
+          ...expected,
+          userId: "forged",
+          status: "completed",
+          balances: [{ userId: "forged", balanceKopecks: 1 }],
+          shares: [{ userId: "forged", amountKopecks: 1 }],
+          transfers: [{ senderId: "forged", amountKopecks: 1 }],
+        }),
+      }),
+    );
+    assert.equal(response.status, 200);
+  }
 });
 test("expense HTTP routes all actions to transactional RPC and strips identity", async () => {
   const token = "a".repeat(64);

@@ -4,17 +4,18 @@ Telegram Mini App для разделения расходов на меропр
 
 ## Текущий этап
 
-Этапы 1–3 завершены. Frontend опубликован; приглашение и выход проверены
-пользователем двумя Telegram-аккаунтами 09.09.2026.
+Этапы 1–5 реализованы и проверены. Frontend этапа 3 опубликован; приглашение и
+выход проверены пользователем двумя Telegram-аккаунтами 09.09.2026. Публикация
+актуального frontend выполняется только отдельным ручным workflow Pages.
 
-Реализован этап 4: создание, список, редактирование и удаление расходов,
-равные доли в целых копейках, права автора/создателя, история и защита от повторов.
-Backend опубликован в существующем проекте Supabase. Проверки и статус
-публикации frontend: [docs/EXPENSES.md](docs/EXPENSES.md).
-Расчёты и переводы — следующие этапы.
+Этап 5 добавляет транзакционную фиксацию расчёта, неизменяемые снимки расходов
+и долей, балансы и детерминированные переводы в целых копейках, безопасный повтор
+запроса и возврат в draft до начала отправки. Миграции и Edge Function опубликованы
+в существующем Supabase. Контракт и приёмка: [docs/SETTLEMENTS.md](docs/SETTLEMENTS.md).
 
 Подключение бота и вход: [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md).
 Контракт мероприятий: [docs/EVENTS.md](docs/EVENTS.md).
+Контракт расчётов: [docs/SETTLEMENTS.md](docs/SETTLEMENTS.md).
 
 ## Локальный запуск
 
@@ -67,10 +68,9 @@ pnpm exec supabase stop
 ```
 
 Миграции создают users, app_sessions, events, members, invitations, expenses,
-expense_shares, expense_requests, audit_log и серверные RPC.
+expense_shares, расчёты, снимки, балансы, transfers, журналы и серверные RPC.
 После запуска Supabase примените их через `pnpm exec supabase migration up`,
-затем выполните `pnpm exec supabase test db`. Остальные сущности добавляются
-по этапам из `docs/PLAN.md`.
+затем выполните `pnpm exec supabase test db`.
 
 ## Публикация
 

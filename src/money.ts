@@ -12,3 +12,7 @@ export function rublesInput(amount: number): string {
 export function formatMoney(amount: number): string {
   return `${Math.floor(amount / 100).toLocaleString("ru-RU")},${String(amount % 100).padStart(2, "0")} ₽`;
 }
+export function formatSignedMoney(amount: number): string {
+  const sign = amount > 0 ? "+" : amount < 0 ? "−" : "";
+  return `${sign}${formatMoney(Math.abs(amount))}`;
+}

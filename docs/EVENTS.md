@@ -14,7 +14,7 @@
 - До 30 участников вместе с создателем; повторный вход не создаёт дубль.
 - Выход участника с подтверждением; создатель не может выйти.
 - Статусы draft/settled/completed: присоединение новых участников и изменения
-  разрешены только в draft. Управление расчётом появится на этапе 5.
+  разрешены только в draft. Фиксация и возврат реализованы на этапе 5.
 - Hash-навигация, пустое состояние, обновление списка/карточки, сообщения об
   ошибках, сохранение формы и requestId при сетевой ошибке. Автообновления пока нет.
 
@@ -22,15 +22,15 @@
 
 `POST /functions/v1/events`, `Authorization: Bearer <app session token>`, JSON:
 
-| action | Поля | Ответ |
-| --- | --- | --- |
-| list | — | `{ events: [...] }` |
-| create | title, description, requestId (UUID) | `{ eventId }` |
-| get | eventId | `{ event: { ..., members, invitationActive } }` |
-| join | invitation (64 hex-символа) | `{ eventId }` |
-| rotate | eventId | `{ ok: true, invitation }` |
-| disable | eventId | `{ ok: true }` |
-| leave | eventId | `{ ok: true }` |
+| action  | Поля                                 | Ответ                                           |
+| ------- | ------------------------------------ | ----------------------------------------------- |
+| list    | —                                    | `{ events: [...] }`                             |
+| create  | title, description, requestId (UUID) | `{ eventId }`                                   |
+| get     | eventId                              | `{ event: { ..., members, invitationActive } }` |
+| join    | invitation (64 hex-символа)          | `{ eventId }`                                   |
+| rotate  | eventId                              | `{ ok: true, invitation }`                      |
+| disable | eventId                              | `{ ok: true }`                                  |
+| leave   | eventId                              | `{ ok: true }`                                  |
 
 Edge Function передаёт хеш сессии в `event_action`. RPC повторно проверяет сессию
 и определяет пользователя в транзакции. Ни userId, ни готовый invitationHash
@@ -52,8 +52,9 @@ RPC доступна только service_role и работает как SECURI
 Выход автора или получателя доли возвращает `member_has_expenses`, включая
 получателя нулевой доли. SQL-тесты обоих случаев проходят. Связи не удаляются
 каскадом. Все изменения расходов и долей берут ту же блокировку строки events.
-Будущая фиксация расчёта обязана использовать эту же блокировку.
 Контракт расходов: [EXPENSES.md](EXPENSES.md).
+Фиксация берёт ту же блокировку events и после перехода в settled блокирует
+вход, выход и управление приглашением. Контракт: [SETTLEMENTS.md](SETTLEMENTS.md).
 
 ## Проверки 09.09.2026
 

@@ -1,4 +1,5 @@
 import { Expenses } from "./Expenses";
+import { Settlements } from "./Settlements";
 import { useEffect, useRef, useState } from "react";
 import {
   eventRequest,
@@ -423,6 +424,12 @@ export function Events({
             token={token}
             userId={userId}
             event={event}
+          />
+          <Settlements
+            token={token}
+            userId={userId}
+            event={event}
+            onChanged={() => setRevision((value) => value + 1)}
           />
         </>
       )}

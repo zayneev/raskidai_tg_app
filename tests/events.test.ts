@@ -83,6 +83,9 @@ test("business errors retain HTTP semantics", async () => {
     ["creator_cannot_leave", 409],
     ["member_has_expenses", 409],
     ["event_locked", 409],
+    ["transfers_started", 409],
+    ["version_conflict", 409],
+    ["request_conflict", 409],
   ] as const) {
     const handler = createEventsHandler({
       allowedOrigins: [],

@@ -14,7 +14,7 @@ export type EventDetails = Omit<EventSummary, "memberCount"> & {
 const messages: Record<string, string> = {
   unauthorized:
     "Сессия истекла. Закройте приложение и откройте его заново из Telegram.",
-  forbidden: "Можно изменять свои расходы; создатель может изменять любые.",
+  forbidden: "Недостаточно прав для этого действия.",
   not_found: "Мероприятие или приглашение недоступно.",
   invitation_invalid:
     "Ссылка отключена или обновлена. Попросите новую у создателя.",
@@ -22,10 +22,11 @@ const messages: Record<string, string> = {
   event_full: "В мероприятии уже 30 участников.",
   creator_cannot_leave: "Создатель не может покинуть мероприятие.",
   member_has_expenses: "Нельзя выйти: вы связаны с расходами мероприятия.",
-  version_conflict:
-    "Расход уже изменён. Обновите список и откройте форму заново.",
+  version_conflict: "Данные мероприятия уже изменились. Обновите экран.",
   request_conflict:
     "Этот запрос уже выполнен с другими данными. Обновите список.",
+  transfers_started:
+    "Нельзя вернуться к редактированию: отправка переводов уже началась.",
   invalid_input: "Проверьте введённые данные.",
 };
 export class EventApiError extends Error {

@@ -12,6 +12,7 @@ const statuses: Record<string, number> = {
   member_has_expenses: 409,
   version_conflict: 409,
   request_conflict: 409,
+  transfers_started: 409,
   invalid_input: 400,
   invalid_action: 400,
 };
@@ -88,6 +89,9 @@ export function createEventsHandler(options: {
           "expenses.create",
           "expenses.update",
           "expenses.delete",
+          "settlements.get",
+          "settlements.settle",
+          "settlements.cancel",
         ].includes(action)
       )
         throw new HttpError(400, "invalid_action");
@@ -120,6 +124,11 @@ export function createEventsHandler(options: {
         ])
           if (body[key] !== undefined) data[key] = body[key];
       }
+      const settlementAction = action.startsWith("settlements.");
+      if (settlementAction) {
+        for (const key of ["eventId", "requestId", "eventVersion"])
+          if (body[key] !== undefined) data[key] = body[key];
+      }
       let token: string | undefined;
       if (action === "join") {
         if (
@@ -134,10 +143,18 @@ export function createEventsHandler(options: {
         data.invitationHash = await sha256(token);
       }
       const result = (await options.rpc(
-        expenseAction ? "expense_action" : "event_action",
+        expenseAction
+          ? "expense_action"
+          : settlementAction
+            ? "settlement_action"
+            : "event_action",
         {
           p_token_hash: hash,
-          p_action: expenseAction ? action.slice("expenses.".length) : action,
+          p_action: expenseAction
+            ? action.slice("expenses.".length)
+            : settlementAction
+              ? action.slice("settlements.".length)
+              : action,
           p_data: data,
         },
       )) as Record<string, unknown>;

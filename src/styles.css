@@ -514,3 +514,42 @@ footer {
   padding: 20px 0;
   font-weight: 600;
 }
+.settlements-panel {
+  margin-top: 24px;
+}
+.balance-list,
+.transfer-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 24px;
+}
+.balance-list li,
+.transfer-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid #edf0e7;
+}
+.balance-list small {
+  grid-column: 1 / -1;
+  color: #64716a;
+  overflow-wrap: anywhere;
+}
+.balance-list .positive {
+  color: #3f742b;
+}
+.balance-list .negative {
+  color: #9a4529;
+}
+.zero-result {
+  padding: 16px;
+  border-radius: 12px;
+  background: #eaf0e2;
+}
+@media (max-width: 390px) {
+  .balance-list li,
+  .transfer-list li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

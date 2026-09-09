@@ -3,7 +3,7 @@
 Реализован 09.09.2026. Миграции `20260909065426_expenses.sql` и
 `20260909065749_expense_share_index.sql` применены к существующему проекту
 `njzfzgqprgkyrqirkvhe`; Edge Function `events` обновлена (версия 2).
-Frontend этапа 4 проверен локально; на GitHub Pages пока опубликован этап 3.
+Frontend этапов 4–5 проверен локально; на GitHub Pages пока опубликован этап 3.
 Реальная приёмка расходов в Telegram ещё не выполнялась.
 
 ## Поведение
@@ -29,13 +29,13 @@ Frontend этапа 4 проверен локально; на GitHub Pages по�
 `POST /functions/v1/events`, `Authorization: Bearer <app session token>`, JSON.
 Все действия ниже включают `eventId` (UUID).
 
-| action | Дополнительные поля | Ответ |
-| --- | --- | --- |
-| expenses.list | — | `{ expenses: [...] }` |
-| expenses.history | — | `{ history: [...] }` |
-| expenses.create | requestId, title, amountKopecks, memberIds | `{ ok: true, expenseId }` |
-| expenses.update | requestId, expenseId, version, title, amountKopecks, memberIds | `{ ok: true, expenseId }` |
-| expenses.delete | requestId, expenseId, version | `{ ok: true, expenseId }` |
+| action           | Дополнительные поля                                            | Ответ                     |
+| ---------------- | -------------------------------------------------------------- | ------------------------- |
+| expenses.list    | —                                                              | `{ expenses: [...] }`     |
+| expenses.history | —                                                              | `{ history: [...] }`      |
+| expenses.create  | requestId, title, amountKopecks, memberIds                     | `{ ok: true, expenseId }` |
+| expenses.update  | requestId, expenseId, version, title, amountKopecks, memberIds | `{ ok: true, expenseId }` |
+| expenses.delete  | requestId, expenseId, version                                  | `{ ok: true, expenseId }` |
 
 `requestId` и `expenseId` — UUID. `version` — версия из списка расходов.
 Ответы расходов используют `author_id`, `author_name`, `amount_kopecks`,
@@ -54,7 +54,8 @@ Edge Function передаёт только разрешённые поля и S
 Порядок блокировок совпадает с event_action: app_sessions FOR SHARE →
 events FOR UPDATE → изменение расхода/долей. После ожидания блокировки
 проверяется срок сессии снова. Отзыв сессии сериализуется через app_sessions.
-Будущая фиксация расчёта обязана брать ту же блокировку events.
+Фиксация этапа 5 берёт ту же блокировку events; конкурентная проверка описана в
+[SETTLEMENTS.md](SETTLEMENTS.md).
 
 Составные FK автора и получателя доли к members используют ON DELETE RESTRICT.
 Доли также ссылаются на `(event_id, id)` расхода, исключая связь с другим
