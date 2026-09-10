@@ -153,3 +153,10 @@ Telegram-аккаунтами 09.09.2026. Этап 3 завершён.
 Edge Function `events` обновлена до версии 3 и принимает `settlements.*`.
 Новых функций, проектов и секретов нет. Frontend Pages не публиковался без
 отдельного ручного запуска. Контракт и приёмка: [SETTLEMENTS.md](SETTLEMENTS.md).
+
+## Дополнение этапа 6 (10.09.2026)
+
+В том же проекте применена миграция `transfer_lifecycle`; Edge Function `events`
+обновлена до версии 4 и принимает `transfers.send`, `transfers.confirm` и
+`transfers.not_received`. Новых функций, проектов и секретов нет. Frontend Pages
+не публиковался. Контракт, ограничения и приёмка: [TRANSFERS.md](TRANSFERS.md).

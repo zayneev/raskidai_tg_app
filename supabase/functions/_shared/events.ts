@@ -13,6 +13,8 @@ const statuses: Record<string, number> = {
   version_conflict: 409,
   request_conflict: 409,
   transfers_started: 409,
+  transfer_unavailable: 409,
+  invalid_transition: 409,
   invalid_input: 400,
   invalid_action: 400,
 };
@@ -92,6 +94,9 @@ export function createEventsHandler(options: {
           "settlements.get",
           "settlements.settle",
           "settlements.cancel",
+          "transfers.send",
+          "transfers.confirm",
+          "transfers.not_received",
         ].includes(action)
       )
         throw new HttpError(400, "invalid_action");
@@ -129,6 +134,16 @@ export function createEventsHandler(options: {
         for (const key of ["eventId", "requestId", "eventVersion"])
           if (body[key] !== undefined) data[key] = body[key];
       }
+      const transferAction = action.startsWith("transfers.");
+      if (transferAction) {
+        for (const key of [
+          "eventId",
+          "transferId",
+          "requestId",
+          "eventVersion",
+        ])
+          if (body[key] !== undefined) data[key] = body[key];
+      }
       let token: string | undefined;
       if (action === "join") {
         if (
@@ -145,16 +160,20 @@ export function createEventsHandler(options: {
       const result = (await options.rpc(
         expenseAction
           ? "expense_action"
-          : settlementAction
-            ? "settlement_action"
-            : "event_action",
+          : transferAction
+            ? "transfer_action"
+            : settlementAction
+              ? "settlement_action"
+              : "event_action",
         {
           p_token_hash: hash,
           p_action: expenseAction
             ? action.slice("expenses.".length)
-            : settlementAction
-              ? action.slice("settlements.".length)
-              : action,
+            : transferAction
+              ? action.slice("transfers.".length)
+              : settlementAction
+                ? action.slice("settlements.".length)
+                : action,
           p_data: data,
         },
       )) as Record<string, unknown>;

@@ -531,6 +531,42 @@ footer {
   padding: 14px 0;
   border-bottom: 1px solid #edf0e7;
 }
+.transfer-list li {
+  display: block;
+}
+.transfer-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+}
+.transfer-status {
+  display: inline-block;
+  margin-top: 8px;
+  color: #52685a;
+  font-size: 13px;
+  font-weight: 700;
+}
+.transfer-list small {
+  display: block;
+  margin-top: 6px;
+  color: #64716a;
+  line-height: 1.5;
+}
+.transfer-actions {
+  margin-top: 12px;
+}
+.transfer-warning {
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: #fff0e8;
+  color: #853b21;
+  font-size: 13px;
+}
+.payment-disclaimer {
+  color: #64716a;
+  font-size: 13px;
+}
 .balance-list small {
   grid-column: 1 / -1;
   color: #64716a;
@@ -550,6 +586,9 @@ footer {
 @media (max-width: 390px) {
   .balance-list li,
   .transfer-list li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .transfer-summary {
     grid-template-columns: minmax(0, 1fr);
   }
 }

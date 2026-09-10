@@ -73,6 +73,47 @@ test("rotation generates random tokens and never exposes hash", async () => {
   assert.equal(hashes[0], await sha256(first.invitation));
   assert.equal(first.invitationHash, undefined);
 });
+test("transfer actions use the transfer RPC and strip forged result fields", async () => {
+  const transferId = "00000000-0000-4000-8000-000000000002";
+  const requestId = "00000000-0000-4000-8000-000000000003";
+  for (const action of [
+    "transfers.send",
+    "transfers.confirm",
+    "transfers.not_received",
+  ]) {
+    const handler = createEventsHandler({
+      allowedOrigins: [],
+      rpc: async (name, args) => {
+        assert.equal(name, "transfer_action");
+        assert.equal(args.p_action, action.slice("transfers.".length));
+        assert.deepEqual(args.p_data, {
+          eventId: id,
+          transferId,
+          requestId,
+          eventVersion: 4,
+        });
+        return { ok: true };
+      },
+    });
+    const response = await handler(
+      request({
+        action,
+        eventId: id,
+        transferId,
+        requestId,
+        eventVersion: 4,
+        userId: id,
+        status: "confirmed",
+        amountKopecks: 1,
+        senderId: id,
+        receiverId: id,
+        sentAt: "forged",
+        confirmedAt: "forged",
+      }),
+    );
+    assert.equal(response.status, 200);
+  }
+});
 test("business errors retain HTTP semantics", async () => {
   for (const [error, status] of [
     ["unauthorized", 401],
@@ -84,6 +125,8 @@ test("business errors retain HTTP semantics", async () => {
     ["member_has_expenses", 409],
     ["event_locked", 409],
     ["transfers_started", 409],
+    ["transfer_unavailable", 409],
+    ["invalid_transition", 409],
     ["version_conflict", 409],
     ["request_conflict", 409],
   ] as const) {
