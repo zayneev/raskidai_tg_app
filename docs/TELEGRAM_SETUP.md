@@ -160,4 +160,6 @@ Edge Function `events` обновлена до версии 3 и принима�
 В том же проекте применена миграция `transfer_lifecycle`; Edge Function `events`
 обновлена до версии 4 и принимает `transfers.send`, `transfers.confirm` и
 `transfers.not_received`. Новых функций, проектов и секретов нет. Frontend Pages
-не публиковался. Контракт, ограничения и приёмка: [TRANSFERS.md](TRANSFERS.md).
+опубликован через ручной workflow. Реальная Telegram-приёмка этапа 6 подтверждена
+пользователем 12.09.2026. Контракт, ограничения и приёмка:
+[TRANSFERS.md](TRANSFERS.md).
