@@ -33,22 +33,28 @@ const messages: Record<string, string> = {
     "Статус перевода уже изменился или это действие сейчас недоступно. Обновите экран.",
   invalid_input: "Проверьте введённые данные.",
 };
-export class EventApiError extends Error {
-  constructor(
-    message: string,
-    public status: number,
-  ) {
-    super(message);
-  }
-}
+import { requestJson, RequestFailure, sessionExpiredEvent } from "./resilience";
+
+export { RequestFailure as EventApiError } from "./resilience";
+
+const reads = new Set([
+  "list",
+  "get",
+  "expenses.list",
+  "expenses.history",
+  "settlements.get",
+  "history.list",
+]);
+const inFlightReads = new Map<string, Promise<unknown>>();
 export async function eventRequest<T>(
   token: string,
   action: string,
   data: Record<string, unknown> = {},
+  options: { signal?: AbortSignal } = {},
 ): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(
+  const safeRead = reads.has(action);
+  const execute = async () => {
+    const result = await requestJson<unknown>(
       `${import.meta.env.VITE_SUPABASE_URL?.replace(/\/$/, "")}/functions/v1/events`,
       {
         method: "POST",
@@ -57,18 +63,33 @@ export async function eventRequest<T>(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ ...data, action }),
-        signal: AbortSignal.timeout(15000),
+      },
+      {
+        signal: options.signal,
+        safeRead,
+        errorMessages: messages,
+        onUnauthorized: () =>
+          window.dispatchEvent(new Event(sessionExpiredEvent)),
       },
     );
-  } catch {
-    throw new Error("Нет связи с сервером. Проверьте интернет и повторите.");
-  }
-  const body = await response.json();
-  if (!response.ok)
-    throw new EventApiError(
-      messages[body.error] ??
-        "Не удалось выполнить действие. Попробуйте ещё раз.",
-      response.status,
-    );
-  return body as T;
+    if (!result || typeof result !== "object" || Array.isArray(result))
+      throw new RequestFailure(
+        "invalid_response",
+        "Сервер вернул некорректный ответ. Попробуйте обновить данные.",
+        undefined,
+        undefined,
+        !safeRead,
+      );
+    return result as T;
+  };
+  if (!safeRead) return execute();
+  // Component-scoped reads own their AbortSignal. Sharing such a promise would
+  // let one unmount cancel a different consumer (notably in React StrictMode).
+  if (options.signal) return execute();
+  const key = `${token}:${action}:${JSON.stringify(data)}`;
+  const existing = inFlightReads.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const promise = execute().finally(() => inFlightReads.delete(key));
+  inFlightReads.set(key, promise);
+  return promise;
 }

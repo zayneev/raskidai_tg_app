@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { clearUserLocalState } from "./local-state";
+import { requestJson, sessionExpiredEvent } from "./resilience";
 
 declare global {
   interface Window {
@@ -20,30 +22,28 @@ type AuthState =
 let currentSession: Session | null = null;
 let pending: Promise<Session> | null = null;
 const baseUrl = import.meta.env.VITE_SUPABASE_URL?.replace(/\/$/, "");
-async function request(path: string, init: RequestInit) {
-  const response = await fetch(`${baseUrl}/functions/v1/${path}`, {
-    ...init,
-    signal: AbortSignal.timeout(15000),
+async function request<T>(path: string, init: RequestInit): Promise<T> {
+  return requestJson<T>(`${baseUrl}/functions/v1/${path}`, init, {
+    timeoutMs: 15000,
+    errorMessages: {
+      invalid_init_data:
+        "Данные Telegram не прошли проверку. Закройте Mini App и откройте его заново.",
+      expired_init_data:
+        "Данные входа Telegram истекли. Закройте Mini App и откройте его заново.",
+      unauthorized: "Сессия истекла. Выполните вход через Telegram ещё раз.",
+    },
   });
-  if (!response.ok) {
-    if (response.status === 401)
-      throw new Error(
-        "Данные входа истекли или не прошли проверку. Закройте приложение и откройте его заново из Telegram.",
-      );
-    throw new Error("Не удалось связаться с сервером. Попробуйте ещё раз.");
-  }
-  return response.json();
 }
 function login(initData: string): Promise<Session> {
   if (!pending) {
-    pending = request("telegram-auth", {
+    pending = request<Session>("telegram-auth", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData }),
     })
       .then(async (session: Session) => {
         // Confirm the issued session through the protected endpoint.
-        const verified = await request("session", {
+        const verified = await request<Omit<Session, "token">>("session", {
           headers: { Authorization: `Bearer ${session.token}` },
         });
         currentSession = { ...verified, token: session.token };
@@ -58,6 +58,19 @@ function login(initData: string): Promise<Session> {
 export function useAuth() {
   const [state, setState] = useState<AuthState>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const reauthenticate = () => {
+      currentSession = null;
+      setState({
+        status: "loading",
+        message: "Сессия истекла. Восстанавливаем вход через Telegram…",
+      });
+      setAttempt((value) => value + 1);
+    };
+    window.addEventListener(sessionExpiredEvent, reauthenticate);
+    return () =>
+      window.removeEventListener(sessionExpiredEvent, reauthenticate);
+  }, []);
   useEffect(() => {
     let active = true;
     const app = window.Telegram?.WebApp;
@@ -121,13 +134,15 @@ export function useAuth() {
     const session = state.session;
     setState({ status: "loading" });
     try {
-      await request("session", {
+      await request<{ ok: true }>("session", {
         method: "DELETE",
         headers: { Authorization: `Bearer ${session.token}` },
       });
+      clearUserLocalState(session.user.id);
       currentSession = null;
       setState({ status: "signed-out" });
     } catch {
+      clearUserLocalState(session.user.id);
       currentSession = null;
       setState({
         status: "error",
@@ -136,5 +151,12 @@ export function useAuth() {
       });
     }
   };
-  return { state, retry: () => setAttempt((value) => value + 1), logout };
+  return {
+    state,
+    retry: () => {
+      currentSession = null;
+      setAttempt((value) => value + 1);
+    },
+    logout,
+  };
 }

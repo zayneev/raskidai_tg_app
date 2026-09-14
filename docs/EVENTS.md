@@ -27,10 +27,10 @@
 | list    | —                                    | `{ events: [...] }`                             |
 | create  | title, description, requestId (UUID) | `{ eventId }`                                   |
 | get     | eventId                              | `{ event: { ..., members, invitationActive } }` |
-| join    | invitation (64 hex-символа)          | `{ eventId }`                                   |
-| rotate  | eventId                              | `{ ok: true, invitation }`                      |
-| disable | eventId                              | `{ ok: true }`                                  |
-| leave   | eventId                              | `{ ok: true }`                                  |
+| join    | invitation (64 hex), requestId       | `{ eventId }`                                   |
+| rotate  | eventId, requestId                   | `{ ok: true, invitation }`                      |
+| disable | eventId, requestId                   | `{ ok: true }`                                  |
+| leave   | eventId, requestId                   | `{ ok: true }`                                  |
 
 Edge Function передаёт хеш сессии в `event_action`. RPC повторно проверяет сессию
 и определяет пользователя в транзакции. Ни userId, ни готовый invitationHash
@@ -44,6 +44,12 @@ RPC доступна только service_role и работает как SECURI
 
 Ошибки: 400 — неверный ввод, 401 — сессия, 403 — права, 404 — недоступное
 мероприятие/приглашение, 409 — лимит, зафиксированный статус или запрещённый выход.
+
+С этапа 7 новый frontend отправляет UUID requestId со всеми HTTP-мутациями.
+`event_requests` хранит точные payload/response, а повтор с другим телом возвращает
+`request_conflict`. Прежние HTTP- и внутренние вызовы этапов 3–6 без requestId
+временно поддерживаются для безопасного rolling deployment. Сеть, восстановление
+и история: [RESILIENCE.md](RESILIENCE.md).
 
 ## Ограничения этапа 4 — реализованы
 

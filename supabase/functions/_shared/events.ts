@@ -1,6 +1,29 @@
 import { bearerToken, HttpError, newSessionToken, sha256 } from "./auth.ts";
 import type { Rpc } from "./handler.ts";
 
+const encoder = new TextEncoder();
+async function invitationToken(
+  secret: string,
+  eventId: string,
+  requestId: string,
+) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const bytes = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(`invitation:${eventId}:${requestId}`),
+  );
+  return Array.from(new Uint8Array(bytes), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 const statuses: Record<string, number> = {
   unauthorized: 401,
   forbidden: 403,
@@ -21,6 +44,7 @@ const statuses: Record<string, number> = {
 export function createEventsHandler(options: {
   allowedOrigins: string[];
   rpc: Rpc;
+  invitationSecret?: string;
 }) {
   return async (request: Request) => {
     const origin = request.headers.get("origin");
@@ -97,6 +121,7 @@ export function createEventsHandler(options: {
           "transfers.send",
           "transfers.confirm",
           "transfers.not_received",
+          "history.list",
         ].includes(action)
       )
         throw new HttpError(400, "invalid_action");
@@ -108,13 +133,26 @@ export function createEventsHandler(options: {
           description: body.description ?? "",
           requestId: body.requestId,
         });
-      if (["get", "rotate", "disable", "leave"].includes(action)) {
+      if (
+        ["get", "rotate", "disable", "leave", "history.list"].includes(action)
+      ) {
         if (
           typeof body.eventId !== "string" ||
           !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(body.eventId)
         )
           throw new HttpError(400, "invalid_input");
         data.eventId = body.eventId;
+      }
+      if (["join", "rotate", "disable", "leave"].includes(action)) {
+        if (
+          body.requestId !== undefined &&
+          (typeof body.requestId !== "string" ||
+            !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(
+              body.requestId,
+            ))
+        )
+          throw new HttpError(400, "invalid_input");
+        if (body.requestId !== undefined) data.requestId = body.requestId;
       }
       const expenseAction = action.startsWith("expenses.");
       if (expenseAction) {
@@ -144,6 +182,11 @@ export function createEventsHandler(options: {
         ])
           if (body[key] !== undefined) data[key] = body[key];
       }
+      const historyAction = action === "history.list";
+      if (historyAction) {
+        if (body.limit !== undefined) data.limit = body.limit;
+        if (body.cursor !== undefined) data.cursor = body.cursor;
+      }
       let token: string | undefined;
       if (action === "join") {
         if (
@@ -154,32 +197,51 @@ export function createEventsHandler(options: {
         data.invitationHash = await sha256(body.invitation);
       }
       if (action === "rotate") {
-        token = newSessionToken();
+        if (typeof body.requestId === "string") {
+          if (!options.invitationSecret)
+            throw new Error("Missing invitation secret");
+          token = await invitationToken(
+            options.invitationSecret,
+            String(data.eventId),
+            body.requestId,
+          );
+        } else {
+          // Compatibility for the already-published stage 6 frontend.
+          token = newSessionToken();
+        }
         data.invitationHash = await sha256(token);
       }
       const result = (await options.rpc(
-        expenseAction
-          ? "expense_action"
-          : transferAction
-            ? "transfer_action"
-            : settlementAction
-              ? "settlement_action"
-              : "event_action",
+        historyAction
+          ? "event_history_action"
+          : expenseAction
+            ? "expense_action"
+            : transferAction
+              ? "transfer_action"
+              : settlementAction
+                ? "settlement_action"
+                : "event_action",
         {
           p_token_hash: hash,
-          p_action: expenseAction
-            ? action.slice("expenses.".length)
-            : transferAction
-              ? action.slice("transfers.".length)
-              : settlementAction
-                ? action.slice("settlements.".length)
-                : action,
+          ...(historyAction
+            ? {}
+            : {
+                p_action: expenseAction
+                  ? action.slice("expenses.".length)
+                  : transferAction
+                    ? action.slice("transfers.".length)
+                    : settlementAction
+                      ? action.slice("settlements.".length)
+                      : action,
+              }),
           p_data: data,
         },
       )) as Record<string, unknown>;
       if (typeof result?.error === "string")
         return respond({ error: result.error }, statuses[result.error] ?? 500);
-      return respond(token ? { ...result, invitation: token } : result);
+      return respond(
+        token && result?.ok ? { ...result, invitation: token } : result,
+      );
     } catch (error) {
       if (error instanceof HttpError)
         return respond({ error: error.code }, error.status);

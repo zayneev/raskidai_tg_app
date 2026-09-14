@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { EventApiError, eventRequest, type EventDetails } from "./events-api";
+import { eventRequest, type EventDetails } from "./events-api";
 import { formatMoney, formatSignedMoney } from "./money";
+import {
+  clearLocalState,
+  isRecord,
+  loadLocalState,
+  saveLocalState,
+} from "./local-state";
+import { RequestFailure, shouldKeepPendingMutation } from "./resilience";
 
 type Balance = {
   userId: string;
@@ -48,6 +55,21 @@ type Pending = {
     transferId?: string;
   };
 };
+const uuid = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+const validPending = (value: unknown): value is Pending =>
+  isRecord(value) &&
+  [
+    "settlements.settle",
+    "settlements.cancel",
+    "transfers.send",
+    "transfers.confirm",
+    "transfers.not_received",
+  ].includes(String(value.action)) &&
+  isRecord(value.data) &&
+  typeof value.data.eventId === "string" &&
+  typeof value.data.requestId === "string" &&
+  uuid.test(value.data.requestId) &&
+  Number.isInteger(value.data.eventVersion);
 
 const statusNames: Record<Transfer["status"], string> = {
   pending: "Ожидает отправки",
@@ -77,6 +99,7 @@ export function Settlements({
 }) {
   const [settlement, setSettlement] = useState<Settlement | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -85,31 +108,58 @@ export function Settlements({
     transfer?: Transfer;
   } | null>(null);
   // Keep the exact request ID and body until an ambiguous network result is resolved.
-  const [pending, setPending] = useState<Pending | null>(null);
+  const [pending, setPending] = useState<Pending | null>(() =>
+    loadLocalState(
+      userId,
+      event.id,
+      "settlement-mutation",
+      "pending",
+      validPending,
+    ),
+  );
   const inFlight = useRef(false);
+  const hasAvailableTransferAction = settlement?.transfers.some(
+    (transfer) =>
+      (transfer.senderId === userId &&
+        ["pending", "not_received"].includes(transfer.status)) ||
+      (transfer.receiverId === userId && transfer.status === "sent"),
+  );
 
   useEffect(() => {
+    const controller = new AbortController();
     let active = true;
-    setLoading(true);
+    if (!settlement) setLoading(true);
+    else setRefreshing(true);
     setError("");
-    eventRequest<{ settlement: Settlement | null }>(token, "settlements.get", {
-      eventId: event.id,
-    })
+    eventRequest<{ settlement: Settlement | null }>(
+      token,
+      "settlements.get",
+      {
+        eventId: event.id,
+      },
+      { signal: controller.signal },
+    )
       .then((result) => {
         if (active) setSettlement(result.settlement);
       })
       .catch((reason) => {
-        if (active)
+        if (active && (reason as RequestFailure)?.kind !== "cancelled")
           setError(
             reason instanceof Error ? reason.message : "Ошибка загрузки.",
           );
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       });
     return () => {
       active = false;
+      controller.abort();
     };
+    // Keep the prior settlement visible during a background refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, event.id, event.version]);
 
   const submit = async (request: Pending) => {
@@ -119,11 +169,13 @@ export function Settlements({
     setError("");
     setNotice("");
     setPending(request);
+    saveLocalState(userId, event.id, "settlement-mutation", "pending", request);
     try {
       const result = await eventRequest<{
         settlement?: Settlement;
       }>(token, request.action, request.data);
       setPending(null);
+      clearLocalState(userId, event.id, "settlement-mutation", "pending");
       setConfirm(null);
       if (request.action === "settlements.settle") {
         setSettlement(result.settlement ?? null);
@@ -146,7 +198,10 @@ export function Settlements({
       }
       onChanged();
     } catch (reason) {
-      if (reason instanceof EventApiError) setPending(null);
+      if (!shouldKeepPendingMutation(reason)) {
+        setPending(null);
+        clearLocalState(userId, event.id, "settlement-mutation", "pending");
+      }
       setError(
         reason instanceof Error
           ? reason.message
@@ -198,14 +253,17 @@ export function Settlements({
           disabled={loading || busy}
           onClick={() => onChanged()}
         >
-          Обновить расчёт
+          {refreshing ? "Обновляем…" : "Обновить расчёт"}
         </button>
       </div>
       {loading && <p role="status">Загружаем расчёт…</p>}
       {error && (
-        <p className="error-box" role="alert">
-          {error}
-        </p>
+        <div className="error-box" role="alert">
+          <p>{error}</p>
+          <button className="secondary" disabled={busy} onClick={onChanged}>
+            Повторить загрузку
+          </button>
+        </div>
       )}
       {notice && <p role="status">{notice}</p>}
       {pending && (
@@ -216,6 +274,21 @@ export function Settlements({
           </p>
           <button disabled={busy} onClick={() => void submit(pending)}>
             Повторить тот же запрос
+          </button>
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={() => {
+              clearLocalState(
+                userId,
+                event.id,
+                "settlement-mutation",
+                "pending",
+              );
+              setPending(null);
+            }}
+          >
+            Не повторять
           </button>
         </div>
       )}
@@ -364,6 +437,14 @@ export function Settlements({
               >
                 Вернуться к редактированию
               </button>
+            )}
+          {event.status === "settled" &&
+            !hasAvailableTransferAction &&
+            !(event.creatorId === userId && !settlement.transfersStartedAt) && (
+              <p className="muted">
+                Сейчас у вас нет доступных действий. Обновите карточку после
+                действий других участников.
+              </p>
             )}
         </>
       )}

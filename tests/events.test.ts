@@ -5,6 +5,7 @@ import { sha256 } from "../supabase/functions/_shared/auth.ts";
 import { launchInvitation, invitationLink } from "../src/invitations.ts";
 const token = "a".repeat(64);
 const id = "00000000-0000-4000-8000-000000000001";
+const requestId = "00000000-0000-4000-8000-000000000003";
 const request = (body: unknown, headers = {}) =>
   new Request("https://example.test/events", {
     method: "POST",
@@ -40,16 +41,21 @@ test("join accepts only invitation capability, hashes it on server", async () =>
   const handler = createEventsHandler({
     allowedOrigins: [],
     rpc: async (_, args) => {
-      assert.deepEqual(args.p_data, { invitationHash: await sha256(token) });
+      assert.deepEqual(args.p_data, {
+        requestId,
+        invitationHash: await sha256(token),
+      });
       return { eventId: id };
     },
   });
   assert.equal(
-    (await handler(request({ action: "join", invitation: token }))).status,
+    (await handler(request({ action: "join", invitation: token, requestId })))
+      .status,
     200,
   );
   assert.equal(
-    (await handler(request({ action: "join", invitation: "bad" }))).status,
+    (await handler(request({ action: "join", invitation: "bad", requestId })))
+      .status,
     400,
   );
 });
@@ -57,21 +63,80 @@ test("rotation generates random tokens and never exposes hash", async () => {
   const hashes: string[] = [];
   const handler = createEventsHandler({
     allowedOrigins: [],
+    invitationSecret: "server-secret-for-tests",
     rpc: async (_, args) => {
       hashes.push((args.p_data as { invitationHash: string }).invitationHash);
       return { ok: true };
     },
   });
   const first = await (
-    await handler(request({ action: "rotate", eventId: id }))
+    await handler(request({ action: "rotate", eventId: id, requestId }))
   ).json();
   const second = await (
-    await handler(request({ action: "rotate", eventId: id }))
+    await handler(
+      request({
+        action: "rotate",
+        eventId: id,
+        requestId: "00000000-0000-4000-8000-000000000004",
+      }),
+    )
   ).json();
   assert.match(first.invitation, /^[a-f0-9]{64}$/);
   assert.notEqual(first.invitation, second.invitation);
   assert.equal(hashes[0], await sha256(first.invitation));
   assert.equal(first.invitationHash, undefined);
+});
+test("rotation retry derives the same capability and history strips forged fields", async () => {
+  const hashes: string[] = [];
+  const handler = createEventsHandler({
+    allowedOrigins: [],
+    invitationSecret: "stable-server-secret",
+    rpc: async (name, args) => {
+      if (name === "event_history_action") {
+        assert.equal(args.p_action, undefined);
+        assert.deepEqual(args.p_data, {
+          eventId: id,
+          limit: 20,
+          cursor: { occurredAt: "2026-09-14T00:00:00Z", id, source: "expense" },
+        });
+        return { items: [], nextCursor: null };
+      }
+      hashes.push((args.p_data as { invitationHash: string }).invitationHash);
+      return { ok: true };
+    },
+  });
+  const body = { action: "rotate", eventId: id, requestId };
+  const first = await (await handler(request(body))).json();
+  const second = await (await handler(request(body))).json();
+  assert.equal(first.invitation, second.invitation);
+  assert.equal(hashes[0], hashes[1]);
+  const history = await handler(
+    request({
+      action: "history.list",
+      eventId: id,
+      limit: 20,
+      cursor: { occurredAt: "2026-09-14T00:00:00Z", id, source: "expense" },
+      actorId: "forged",
+      status: "forged",
+      before: { secret: true },
+    }),
+  );
+  assert.equal(history.status, 200);
+});
+test("stage 6 event mutations remain accepted during the frontend rollout", async () => {
+  const handler = createEventsHandler({
+    allowedOrigins: [],
+    rpc: async (_name, args) => {
+      assert.equal(
+        (args.p_data as Record<string, unknown>).requestId,
+        undefined,
+      );
+      return { ok: true };
+    },
+  });
+  const response = await handler(request({ action: "rotate", eventId: id }));
+  assert.equal(response.status, 200);
+  assert.match((await response.json()).invitation, /^[a-f0-9]{64}$/);
 });
 test("transfer actions use the transfer RPC and strip forged result fields", async () => {
   const transferId = "00000000-0000-4000-8000-000000000002";

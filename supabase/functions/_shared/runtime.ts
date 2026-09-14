@@ -31,6 +31,7 @@ export function serve(kind: "telegram-auth" | "session" | "events") {
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean),
+    invitationSecret: serviceKey,
     rpc,
   };
   Deno.serve(

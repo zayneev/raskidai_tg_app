@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { eventRequest, EventApiError, type EventDetails } from "./events-api";
+import { eventRequest, type EventDetails } from "./events-api";
 import { formatMoney, parseRubles, rublesInput } from "./money";
+import {
+  clearLocalState,
+  isRecord,
+  loadLocalState,
+  saveLocalState,
+} from "./local-state";
+import { RequestFailure, shouldKeepPendingMutation } from "./resilience";
 
 type Expense = {
   id: string;
@@ -11,15 +18,45 @@ type Expense = {
   version: number;
   shares: { user_id: string; display_name: string; amount_kopecks: number }[];
 };
-type Audit = {
-  id: string;
-  actor_name: string;
-  action: "create" | "update" | "delete";
-  created_at: string;
-  before_data: Expense | null;
-  after_data: Expense | null;
-};
 type Pending = { action: string; data: Record<string, unknown> };
+type ExpenseDraft = {
+  mode: "new" | "edit";
+  expense: Expense | null;
+  title: string;
+  amount: string;
+  selected: string[];
+  eventVersion: number;
+};
+const uuid = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+const validPending = (value: unknown): value is Pending =>
+  isRecord(value) &&
+  ["expenses.create", "expenses.update", "expenses.delete"].includes(
+    String(value.action),
+  ) &&
+  isRecord(value.data) &&
+  typeof value.data.requestId === "string" &&
+  uuid.test(value.data.requestId) &&
+  typeof value.data.eventId === "string";
+const validExpense = (value: unknown): value is Expense =>
+  isRecord(value) &&
+  typeof value.id === "string" &&
+  typeof value.author_id === "string" &&
+  typeof value.author_name === "string" &&
+  typeof value.title === "string" &&
+  Number.isSafeInteger(value.amount_kopecks) &&
+  Number.isInteger(value.version) &&
+  Array.isArray(value.shares);
+const validDraft = (value: unknown): value is ExpenseDraft =>
+  isRecord(value) &&
+  (value.mode === "new" || value.mode === "edit") &&
+  typeof value.title === "string" &&
+  value.title.length <= 120 &&
+  typeof value.amount === "string" &&
+  Array.isArray(value.selected) &&
+  value.selected.every((id) => typeof id === "string") &&
+  Number.isInteger(value.eventVersion) &&
+  ((value.mode === "new" && value.expense === null) ||
+    (value.mode === "edit" && validExpense(value.expense)));
 function Snapshot({ expense }: { expense: Expense }) {
   return (
     <div>
@@ -47,57 +84,118 @@ export function Expenses({
   event: EventDetails;
 }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [history, setHistory] = useState<Audit[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [form, setForm] = useState<Expense | "new" | null>(null);
-  const [title, setTitle] = useState("");
-  const [amount, setAmount] = useState("");
-  const [selected, setSelected] = useState<string[]>([]);
+  const restored = useRef(
+    loadLocalState(userId, event.id, "expense-form", "draft", validDraft),
+  );
+  const restoredExpense = restored.current?.expense as Expense | null;
+  const [form, setForm] = useState<Expense | "new" | null>(
+    restored.current
+      ? restored.current.mode === "new"
+        ? "new"
+        : restoredExpense
+      : null,
+  );
+  const [title, setTitle] = useState(restored.current?.title ?? "");
+  const [amount, setAmount] = useState(restored.current?.amount ?? "");
+  const [selected, setSelected] = useState<string[]>(
+    (restored.current?.selected ?? []).filter((id) =>
+      event.members.some((member) => member.id === id),
+    ),
+  );
   const [deleting, setDeleting] = useState<Expense | null>(null);
   // A failed/ambiguous request is retried with the exact payload and UUID.
-  const [pending, setPending] = useState<Pending | null>(null);
+  const [pending, setPending] = useState<Pending | null>(() =>
+    loadLocalState(
+      userId,
+      event.id,
+      "expense-mutation",
+      "pending",
+      validPending,
+    ),
+  );
+  const editingVersion = useRef(
+    restored.current?.eventVersion ?? event.version,
+  );
   const inFlight = useRef(false);
   useEffect(() => {
+    const controller = new AbortController();
     let active = true;
-    setLoading(true);
-    Promise.all([
-      eventRequest<{ expenses: Expense[] }>(token, "expenses.list", {
+    if (!expenses.length) setLoading(true);
+    else setRefreshing(true);
+    eventRequest<{ expenses: Expense[] }>(
+      token,
+      "expenses.list",
+      {
         eventId: event.id,
-      }),
-      eventRequest<{ history: Audit[] }>(token, "expenses.history", {
-        eventId: event.id,
-      }),
-    ])
-      .then(([a, b]) => {
+      },
+      { signal: controller.signal },
+    )
+      .then((result) => {
         if (active) {
-          setExpenses(a.expenses);
-          setHistory(b.history);
+          setExpenses(result.expenses);
         }
       })
       .catch((e) => {
-        if (active) setError(e.message);
+        if (active && (e as RequestFailure)?.kind !== "cancelled")
+          setError(
+            e instanceof Error ? e.message : "Ошибка загрузки расходов.",
+          );
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       });
     return () => {
       active = false;
+      controller.abort();
     };
+    // Keep existing data and the form while refreshing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, event.id, revision]);
+  const persistDraft = (
+    nextForm: Expense | "new",
+    nextTitle: string,
+    nextAmount: string,
+    nextSelected: string[],
+  ) => {
+    if (pending) {
+      clearLocalState(userId, event.id, "expense-mutation", "pending");
+      setPending(null);
+    }
+    saveLocalState(userId, event.id, "expense-form", "draft", {
+      mode: nextForm === "new" ? "new" : "edit",
+      expense: nextForm === "new" ? null : nextForm,
+      title: nextTitle,
+      amount: nextAmount,
+      selected: nextSelected,
+      eventVersion: editingVersion.current,
+    });
+  };
   const open = (expense: Expense | "new") => {
     setForm(expense);
     setError("");
     setNotice("");
     setTitle(expense === "new" ? "" : expense.title);
     setAmount(expense === "new" ? "" : rublesInput(expense.amount_kopecks));
-    setSelected(
+    const nextSelected =
       expense === "new"
         ? event.members.map((m) => m.id)
-        : expense.shares.map((s) => s.user_id),
+        : expense.shares.map((s) => s.user_id);
+    setSelected(nextSelected);
+    editingVersion.current = event.version;
+    persistDraft(
+      expense,
+      expense === "new" ? "" : expense.title,
+      expense === "new" ? "" : rublesInput(expense.amount_kopecks),
+      nextSelected,
     );
   };
   const submit = async (request: Pending) => {
@@ -106,16 +204,30 @@ export function Expenses({
     setBusy(true);
     setError("");
     setPending(request);
+    saveLocalState(userId, event.id, "expense-mutation", "pending", request);
     try {
       await eventRequest(token, request.action, request.data);
       setPending(null);
+      clearLocalState(userId, event.id, "expense-mutation", "pending");
+      clearLocalState(userId, event.id, "expense-form", "draft");
       setForm(null);
       setDeleting(null);
       setNotice("Сохранено.");
       setRevision((v) => v + 1);
     } catch (e) {
-      if (e instanceof EventApiError && e.status >= 400 && e.status < 500)
+      if (!shouldKeepPendingMutation(e)) {
         setPending(null);
+        clearLocalState(userId, event.id, "expense-mutation", "pending");
+      }
+      if (
+        e instanceof RequestFailure &&
+        (e.kind === "forbidden" ||
+          e.kind === "not_found" ||
+          e.code === "event_locked")
+      ) {
+        clearLocalState(userId, event.id, "expense-form", "draft");
+        setForm(null);
+      }
       setError(e instanceof Error ? e.message : "Не удалось сохранить.");
     } finally {
       inFlight.current = false;
@@ -136,13 +248,20 @@ export function Expenses({
             setRevision((v) => v + 1);
           }}
         >
-          Обновить расходы
+          {refreshing ? "Обновляем…" : "Обновить расходы"}
         </button>
       </div>
       {error && (
-        <p className="error-box" role="alert">
-          {error}
-        </p>
+        <div className="error-box" role="alert">
+          <p>{error}</p>
+          <button
+            className="secondary"
+            disabled={busy || refreshing}
+            onClick={() => setRevision((value) => value + 1)}
+          >
+            Повторить загрузку
+          </button>
+        </div>
       )}
       {notice && <p role="status">{notice}</p>}
       {pending && (
@@ -153,6 +272,16 @@ export function Expenses({
           </p>
           <button disabled={busy} onClick={() => void submit(pending)}>
             Повторить отправку
+          </button>
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={() => {
+              clearLocalState(userId, event.id, "expense-mutation", "pending");
+              setPending(null);
+            }}
+          >
+            Не повторять
           </button>
         </div>
       )}
@@ -195,6 +324,13 @@ export function Expenses({
           }}
         >
           <h3>{form === "new" ? "Новый расход" : "Редактирование расхода"}</h3>
+          {event.version !== editingVersion.current && (
+            <p className="warning-box" role="alert">
+              Данные мероприятия изменились во время редактирования. Обновите
+              расходы перед сохранением; старая версия не будет отправлена
+              молча.
+            </p>
+          )}
           <p>
             Плательщик:{" "}
             {form === "new"
@@ -208,7 +344,10 @@ export function Expenses({
               maxLength={120}
               value={title}
               disabled={disabled}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                persistDraft(form, e.target.value, amount, selected);
+              }}
             />
           </label>
           <label>
@@ -219,7 +358,10 @@ export function Expenses({
               placeholder="0,00"
               value={amount}
               disabled={disabled}
-              onChange={(e) => setAmount(e.target.value)}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                persistDraft(form, title, e.target.value, selected);
+              }}
             />
           </label>
           <fieldset disabled={disabled}>
@@ -229,13 +371,13 @@ export function Expenses({
                 <input
                   type="checkbox"
                   checked={selected.includes(m.id)}
-                  onChange={(e) =>
-                    setSelected((ids) =>
-                      e.target.checked
-                        ? [...ids, m.id]
-                        : ids.filter((id) => id !== m.id),
-                    )
-                  }
+                  onChange={(e) => {
+                    const next = e.target.checked
+                      ? [...selected, m.id]
+                      : selected.filter((id) => id !== m.id);
+                    setSelected(next);
+                    persistDraft(form, title, amount, next);
+                  }}
                 />
                 {m.displayName}
                 {m.id === userId ? " (вы)" : ""}
@@ -257,14 +399,29 @@ export function Expenses({
               type="button"
               className="secondary"
               disabled={disabled}
-              onClick={() => setForm(null)}
+              onClick={() => {
+                clearLocalState(userId, event.id, "expense-form", "draft");
+                clearLocalState(
+                  userId,
+                  event.id,
+                  "expense-mutation",
+                  "pending",
+                );
+                setPending(null);
+                setForm(null);
+              }}
             >
               Отмена
             </button>
           </div>
         </form>
       )}
-      {!loading && !expenses.length && <p>Расходов пока нет.</p>}
+      {!loading && !expenses.length && !error && (
+        <div className="empty-state compact-empty">
+          <h3>Расходов пока нет</h3>
+          <p>Добавьте первую покупку, чтобы начать общий расчёт.</p>
+        </div>
+      )}
       <div className="expense-list">
         {expenses.map((expense) => (
           <article key={expense.id} className="expense-item">
@@ -322,35 +479,6 @@ export function Expenses({
           </div>
         </div>
       )}
-      <details>
-        <summary>История изменений ({history.length})</summary>
-        {!history.length && <p>История пока пуста.</p>}
-        {history.map((item) => (
-          <article key={item.id} className="expense-item">
-            <p>
-              <strong>{item.actor_name}</strong> ·{" "}
-              {
-                { create: "Создание", update: "Изменение", delete: "Удаление" }[
-                  item.action
-                ]
-              }{" "}
-              · {new Date(item.created_at).toLocaleString("ru-RU")}
-            </p>
-            {item.before_data && (
-              <>
-                <p>До:</p>
-                <Snapshot expense={item.before_data} />
-              </>
-            )}
-            {item.after_data && (
-              <>
-                <p>После:</p>
-                <Snapshot expense={item.after_data} />
-              </>
-            )}
-          </article>
-        ))}
-      </details>
     </section>
   );
 }
