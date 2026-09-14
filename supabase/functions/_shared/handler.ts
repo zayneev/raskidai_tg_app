@@ -10,7 +10,12 @@ export type Rpc = (
   name: string,
   args: Record<string, unknown>,
 ) => Promise<unknown>;
-type Options = { botToken: string; allowedOrigins: string[]; rpc: Rpc };
+type Options = {
+  botToken: string;
+  allowedOrigins: string[];
+  rpc: Rpc;
+  backendVersion?: string;
+};
 export function createHandler(
   kind: "telegram-auth" | "session",
   options: Options,
@@ -21,6 +26,7 @@ export function createHandler(
       "Content-Type": "application/json",
       "Cache-Control": "no-store",
       Vary: "Origin",
+      "X-Raskidai-Backend-Version": options.backendVersion ?? "development",
     });
     if (origin && options.allowedOrigins.includes(origin))
       headers.set("Access-Control-Allow-Origin", origin);

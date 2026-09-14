@@ -1,6 +1,8 @@
 import { createEventsHandler } from "./events.ts";
 import { createHandler, type Rpc } from "./handler.ts";
 
+export const BACKEND_VERSION = "8";
+
 export function serve(kind: "telegram-auth" | "session" | "events") {
   const required = (name: string) => {
     const value = Deno.env.get(name);
@@ -32,6 +34,7 @@ export function serve(kind: "telegram-auth" | "session" | "events") {
       .map((value) => value.trim())
       .filter(Boolean),
     invitationSecret: serviceKey,
+    backendVersion: BACKEND_VERSION,
     rpc,
   };
   Deno.serve(

@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit && tsc --project tsconfig.functions.json",
     "build": "pnpm typecheck && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "smoke": "node --experimental-strip-types scripts/smoke-check.ts"
   },
   "dependencies": {
     "react": "^19.2.8",

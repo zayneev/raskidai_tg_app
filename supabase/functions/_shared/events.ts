@@ -45,6 +45,7 @@ export function createEventsHandler(options: {
   allowedOrigins: string[];
   rpc: Rpc;
   invitationSecret?: string;
+  backendVersion?: string;
 }) {
   return async (request: Request) => {
     const origin = request.headers.get("origin");
@@ -54,6 +55,7 @@ export function createEventsHandler(options: {
       Vary: "Origin",
       "Access-Control-Allow-Headers": "authorization, content-type",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "X-Raskidai-Backend-Version": options.backendVersion ?? "development",
     });
     if (origin && options.allowedOrigins.includes(origin))
       headers.set("Access-Control-Allow-Origin", origin);
