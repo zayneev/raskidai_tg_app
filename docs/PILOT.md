@@ -88,11 +88,10 @@ Smoke не содержит токенов и не меняет данные: п
 ## Backup procedure
 
 Free-проект не имеет гарантированной доступной пользователю ежедневной копии;
-Supabase рекомендует регулярно выполнять логический `db dump`. Используется
-Supabase CLI 2.116.0 или проверенная более новая версия. Перед каждым запуском
-снова прочитать `supabase db dump --help` и актуальную документацию:
-[Database Backups](https://supabase.com/docs/guides/platform/backups) и
-[CLI backup/restore](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore).
+поэтому регулярно выполняется логический dump нативными PostgreSQL 17
+`pg_dump`/`psql`. Перед изменением процедуры снова проверить актуальную
+документацию: [Database Backups](https://supabase.com/docs/guides/platform/backups)
+и [native Postgres migration](https://supabase.com/docs/guides/platform/migrating-to-supabase/postgres).
 
 Changelog проверен 14.09.2026. Для этого runbook учтены переход self-hosted
 Supabase на PostgreSQL 17, исправление повторного применения актуальных
@@ -100,16 +99,30 @@ credentials после physical restore и игнорирование явног
 миграция поэтому не закрепляет версию `pg_cron`. Эти platform-изменения не
 заменяют обязательный локальный logical restore drill.
 
+Docker не требуется. На проверочной машине используется нативный PostgreSQL
+17.11 из Homebrew, pgTAP 1.3.4 и pg_cron 1.6.8. Перед запуском нужно подключить
+зашифрованный APFS-образ или зашифрованный внешний том; production backup
+разрешено писать только под `/Volumes`.
+
 ```sh
-scripts/backup.sh /path/to/encrypted-private-volume/raskidai-YYYYMMDDTHHMMSSZ
+scripts/backup.sh /Volumes/RaskidaiBackup/raskidai-YYYYMMDDTHHMMSSZ
 ```
 
+Скрипт запрашивает passwordless Session pooler URL и пароль БД отдельно. Пароль
+вводится без отображения, хранится только во временном `PGPASSFILE` с режимом
+0600 и удаляется при любом завершении. Нельзя помещать пароль в URL, аргументы,
+репозиторий или manifest. Нативные `pg_dump` и `psql` берутся из
+`/opt/homebrew/opt/postgresql@17/bin`.
+
 Скрипт отказывается писать dump внутрь репозитория, создаёт каталог с режимом
-0700 и файлы 0600. Он сохраняет roles/schema/data отдельными plain-SQL файлами,
-COPY-данные, контрольные количества строк, список миграций и Edge Functions,
-UTC-время, CLI-версию, Git SHA, SHA-256 файлов и имена необходимых секретов без
-значений. Storage objects в приложении сейчас не используются; если появятся,
-их нужно копировать отдельно — database backup хранит только metadata.
+0700 и файлы 0600, а также требует чистое Git-состояние, чтобы Git SHA точно
+соответствовал сохранённым миграциям и коду. Он сохраняет roles/schema/data
+отдельными plain-SQL файлами, COPY-данные, контрольные количества строк, список
+миграций и имена локальных Edge Functions. Их содержимое фиксируется Git SHA.
+Manifest содержит UTC-время, версии сервера и `pg_dump`, Git SHA, SHA-256 файлов
+и имена необходимых секретов без значений. Storage objects в приложении сейчас
+не используются; если появятся, их нужно копировать отдельно — database backup
+хранит только metadata.
 
 Dump может содержать production-персональные данные. Его нельзя коммитить,
 публиковать, оставлять незашифрованным или прикладывать к CI. После копирования
@@ -123,24 +136,37 @@ Dump может содержать production-персональные данн�
 и версию. Скрипт дополнительно отвергает `supabase.co` и production project ref.
 
 ```sh
-scripts/restore-verify.sh /secure/backup-directory \
-  'postgresql://postgres:LOCAL_PASSWORD@127.0.0.1:5432/raskidai_restore_drill'
+scripts/local-restore-drill.sh \
+  /Volumes/RaskidaiBackup/raskidai-YYYYMMDDTHHMMSSZ
 ```
 
-Проверка выполняет restore в одной транзакции с `ON_ERROR_STOP`, затем проверяет
-таблицы, функции, extensions, RLS, grants, SECURITY INVOKER, ссылки, суммы долей,
-балансы, направления и полное закрытие переводов, неизвестную app-сессию,
-контрольные количества и весь pgTAP suite. После этого нужно отдельно запустить
-Advisors локальной среды, выполнить основные read/mutation RPC на тестовых
-фикстурах и удалить одноразовую БД и незашифрованную рабочую копию dump.
+Wrapper создаёт отдельный PostgreSQL 17 cluster в системном временном каталоге,
+случайный одноразовый пароль, SCRAM-доступ только через `127.0.0.1:55432` и БД
+`raskidai_restore_drill`. PostgreSQL не добавляется в автозапуск. После проверки
+wrapper останавливает сервер и удаляет cluster, пароль, лог и восстановленные
+production-данные даже при ошибке.
 
-На текущей машине Docker, `psql` и Deno не установлены, поэтому успешное
-восстановление **не заявляется**. Поле доказательства заполняется только после
-drill: дата, target host/database, PostgreSQL и CLI версии, Git SHA, checksum,
-совпадение counts, число pgTAP-тестов, Advisors, время восстановления и факт
-удаления target/dump. Пока RPO/RTO не гарантируются. Цель пилота после первого
-успешного drill: backup не реже 24 часов (целевой RPO 24 ч) и измеренный RTO,
-а не обещанный заранее.
+Проверка в одной транзакции с `ON_ERROR_STOP` создаёт роли, применяет локальные
+миграции того же Git SHA и загружает COPY-данные. `schema.sql` сохраняется для
+инспекции и дополнительного доказательства, но не подменяет миграции. Затем
+проверяются таблицы, функции, extensions, RLS, grants, SECURITY INVOKER, ссылки,
+суммы долей, балансы, направления и полное закрытие переводов, неизвестная
+app-сессия, контрольные количества и весь pgTAP suite. После этого нужно отдельно
+запустить Advisors локальной среды, выполнить основные read/mutation RPC на
+тестовых фикстурах и удалить одноразовую БД и незашифрованную рабочую копию dump.
+
+На текущей машине нативные PostgreSQL 17, `psql`, pgTAP и pg_cron установлены и
+проверены без Docker; Deno остаётся проверкой CI. Успешное восстановление пока
+**не заявляется**: нужен зашифрованный production backup и фактический drill.
+Поле доказательства заполняется только после drill: дата, target host/database,
+версии PostgreSQL и `pg_dump`, Git SHA, checksum, совпадение counts, число pgTAP-
+тестов, Advisors, время восстановления и факт удаления target/dump.
+
+Для ограниченного пилота среди друзей backup выполняется перед каждой production-
+миграцией, после важного завершённого мероприятия и раз в месяц при наличии
+активности. Хранятся последние 3–6 копий. Принятый RPO — до одного месяца либо
+с момента последнего завершённого мероприятия; RTO измеряется первым drill, а
+не обещается заранее.
 
 Необходимые секреты для восстановления сервиса, без значений:
 
@@ -256,7 +282,8 @@ forward-миграцией после backup и проверки; `db reset`, у
 
 ## Известные ограничения после подготовки этапа 8
 
-- Restore drill и измеренный RTO отсутствуют до появления Docker/PostgreSQL 17.
+- Restore drill и измеренный RTO отсутствуют до создания зашифрованного backup;
+  локальная PostgreSQL 17 среда уже готова без Docker.
 - Реальная Telegram-матрица и мероприятие A/B/C требуют физических устройств.
 - Нет гарантированного RPO на Free; требуется внешний зашифрованный backup.
 - Request/history retention не ограничен; рост нужно наблюдать в пилоте.
