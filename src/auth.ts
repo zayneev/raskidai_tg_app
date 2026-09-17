@@ -87,12 +87,13 @@ export function useAuth() {
       const safe = app?.safeAreaInset;
       const content = app?.contentSafeAreaInset;
       const root = document.documentElement;
-      root.style.setProperty("--tg-safe-top", `${(safe?.top ?? 0) + (content?.top ?? 0)}px`);
+      root.style.setProperty("--tg-safe-top", `${Math.max(safe?.top ?? 0, content?.top ?? 0)}px`);
       root.style.setProperty("--tg-safe-bottom", `${(safe?.bottom ?? 0) + (content?.bottom ?? 0)}px`);
     };
     applyInsets();
     app?.onEvent?.("safeAreaChanged", applyInsets);
     app?.onEvent?.("contentSafeAreaChanged", applyInsets);
+    app?.onEvent?.("fullscreenChanged", applyInsets);
     const fullscreenFallback = () => app?.expand();
     app?.onEvent?.("fullscreenFailed", fullscreenFallback);
     if (app?.isVersionAtLeast?.("6.1") ?? true) {
@@ -103,6 +104,7 @@ export function useAuth() {
     const cleanup = () => {
       app?.offEvent?.("safeAreaChanged", applyInsets);
       app?.offEvent?.("contentSafeAreaChanged", applyInsets);
+      app?.offEvent?.("fullscreenChanged", applyInsets);
       app?.offEvent?.("fullscreenFailed", fullscreenFallback);
     };
     if (!app?.initData) {
