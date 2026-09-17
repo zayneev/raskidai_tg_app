@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { eventRequest, type EventDetails } from "./events-api";
-import { formatMoney, parseRubles, rublesInput } from "./money";
+import { formatDisplayMoney, formatMoney, parseRubles, rublesInput } from "./money";
 import {
   clearLocalState,
   isRecord,
@@ -8,16 +8,9 @@ import {
   saveLocalState,
 } from "./local-state";
 import { RequestFailure, shouldKeepPendingMutation } from "./resilience";
+import type { ExpenseRecord } from "./visual";
 
-type Expense = {
-  id: string;
-  author_id: string;
-  author_name: string;
-  title: string;
-  amount_kopecks: number;
-  version: number;
-  shares: { user_id: string; display_name: string; amount_kopecks: number }[];
-};
+type Expense = ExpenseRecord;
 type Pending = { action: string; data: Record<string, unknown> };
 type ExpenseDraft = {
   mode: "new" | "edit";
@@ -57,31 +50,16 @@ const validDraft = (value: unknown): value is ExpenseDraft =>
   Number.isInteger(value.eventVersion) &&
   ((value.mode === "new" && value.expense === null) ||
     (value.mode === "edit" && validExpense(value.expense)));
-function Snapshot({ expense }: { expense: Expense }) {
-  return (
-    <div>
-      <strong>
-        {expense.title} · {formatMoney(expense.amount_kopecks)}
-      </strong>
-      <p>Оплатил(а): {expense.author_name}</p>
-      <ul>
-        {expense.shares.map((s) => (
-          <li key={s.user_id}>
-            {s.display_name} — {formatMoney(s.amount_kopecks)}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
 export function Expenses({
   token,
   userId,
   event,
+  onChanged,
 }: {
   token: string;
   userId: string;
   event: EventDetails;
+  onChanged: () => void;
 }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(true);
@@ -109,6 +87,8 @@ export function Expenses({
     ),
   );
   const [deleting, setDeleting] = useState<Expense | null>(null);
+  const [detail, setDetail] = useState<Expense | null>(null);
+  const [onlyMine, setOnlyMine] = useState(false);
   // A failed/ambiguous request is retried with the exact payload and UUID.
   const [pending, setPending] = useState<Pending | null>(() =>
     loadLocalState(
@@ -214,6 +194,7 @@ export function Expenses({
       setDeleting(null);
       setNotice("Сохранено.");
       setRevision((v) => v + 1);
+      onChanged();
     } catch (e) {
       if (!shouldKeepPendingMutation(e)) {
         setPending(null);
@@ -236,10 +217,16 @@ export function Expenses({
   };
   const locked = event.status !== "draft";
   const disabled = busy || pending !== null;
+  const visible = onlyMine ? expenses.filter((expense) => expense.author_id === userId) : expenses;
+  const groups = visible.reduce<Record<string, Expense[]>>((result, expense) => {
+    const day = expense.created_at ? new Date(expense.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) : "Без даты";
+    (result[day] ??= []).push(expense);
+    return result;
+  }, {});
+  const mineTotal = visible.reduce((sum, expense) => sum + expense.amount_kopecks, 0);
   return (
-    <section className="panel expenses-panel">
-      <div className="page-heading">
-        <h2>Расходы</h2>
+    <section className="expenses-panel">
+      <div className="section-tools">
         <button
           className="small-button"
           disabled={busy || loading}
@@ -248,7 +235,7 @@ export function Expenses({
             setRevision((v) => v + 1);
           }}
         >
-          {refreshing ? "Обновляем…" : "Обновить расходы"}
+          {refreshing ? "Обновляем…" : "Обновить"}
         </button>
       </div>
       {error && (
@@ -286,19 +273,11 @@ export function Expenses({
         </div>
       )}
       {loading && <p role="status">Загружаем расходы…</p>}
-      {locked ? (
-        <p>Расчёт зафиксирован. Изменение расходов недоступно.</p>
-      ) : (
-        <button
-          disabled={disabled || form !== null || deleting !== null}
-          onClick={() => open("new")}
-        >
-          + Добавить расход
-        </button>
-      )}
+      <label className="filter-row"><span>Только оплаченные мной</span><input type="checkbox" role="switch" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} /></label>
+      {onlyMine && <p className="filter-result">{visible.length} {visible.length === 1 ? "расход" : "расхода"} · Вы оплатили {formatDisplayMoney(mineTotal)}</p>}
       {form && (
         <form
-          className="event-form"
+          className="event-form sheet"
           onSubmit={(e) => {
             e.preventDefault();
             const kopecks = parseRubles(amount);
@@ -416,38 +395,17 @@ export function Expenses({
           </div>
         </form>
       )}
-      {!loading && !expenses.length && !error && (
+      {!loading && !visible.length && !error && (
         <div className="empty-state compact-empty">
-          <h3>Расходов пока нет</h3>
-          <p>Добавьте первую покупку, чтобы начать общий расчёт.</p>
+          <h3>{onlyMine ? "Вы пока ничего не оплатили" : "Расходов пока нет"}</h3>
+          <p>{onlyMine ? "Отключите фильтр, чтобы увидеть все расходы." : "Добавьте первую покупку, чтобы начать общий расчёт."}</p>
         </div>
       )}
       <div className="expense-list">
-        {expenses.map((expense) => (
-          <article key={expense.id} className="expense-item">
-            <Snapshot expense={expense} />
-            {!locked &&
-              (expense.author_id === userId || event.creatorId === userId) && (
-                <div className="actions">
-                  <button
-                    className="secondary"
-                    disabled={disabled || form !== null || deleting !== null}
-                    onClick={() => open(expense)}
-                  >
-                    Изменить
-                  </button>
-                  <button
-                    className="secondary danger"
-                    disabled={disabled || form !== null || deleting !== null}
-                    onClick={() => setDeleting(expense)}
-                  >
-                    Удалить
-                  </button>
-                </div>
-              )}
-          </article>
-        ))}
+        {Object.entries(groups).map(([day, items]) => <section className="expense-day" key={day}><h3>{day}</h3><div className="day-card">{items?.map((expense) => <button className="expense-row" key={expense.id} onClick={() => setDetail(expense)}><span><strong>{expense.title}</strong><small>Оплатили {expense.author_id === userId ? "вы" : expense.author_name} · {expense.shares.length === event.members.length ? "На всех" : `На ${expense.shares.length} участников`}</small></span><b>{formatDisplayMoney(expense.amount_kopecks)}</b><span aria-hidden="true">›</span></button>)}</div></section>)}
       </div>
+      {detail && <div className="sheet-backdrop" onClick={() => setDetail(null)}><section className="sheet detail-sheet" role="dialog" aria-modal="true" aria-label="Подробности расхода" onClick={(e) => e.stopPropagation()}><button className="sheet-close secondary" onClick={() => setDetail(null)} aria-label="Закрыть">×</button><h2>{detail.title}</h2><p className="muted">{detail.created_at ? new Date(detail.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" }) : "Дата не указана"}</p><strong className="detail-amount">{formatMoney(detail.amount_kopecks)}</strong><p>Оплатил(а): {detail.author_name}</p><h3>Разделено поровну</h3><ul className="detail-shares">{detail.shares.map((share) => <li key={share.user_id}><span>{share.display_name}</span><strong>{formatMoney(share.amount_kopecks)}</strong></li>)}</ul>{!locked && (detail.author_id === userId || event.creatorId === userId) && <div className="actions"><button onClick={() => { open(detail); setDetail(null); }}>Изменить</button><button className="secondary danger" onClick={() => { setDeleting(detail); setDetail(null); }}>Удалить</button></div>}</section></div>}
+      {!locked && <div className="bottom-bar"><button className="primary-action" disabled={disabled || form !== null || deleting !== null} onClick={() => open("new")}><span aria-hidden="true">＋</span> Добавить расход</button></div>}
       {deleting && (
         <div className="confirmation" role="alert">
           <h3>Удалить «{deleting.title}»?</h3>

@@ -6,6 +6,7 @@ export type EventSummary = {
   status: "draft" | "settled" | "completed";
   version: number;
   memberCount: number;
+  createdAt?: string;
 };
 export type EventDetails = Omit<EventSummary, "memberCount"> & {
   members: { id: string; displayName: string; joinedAt: string }[];

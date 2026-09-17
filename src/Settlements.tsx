@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { eventRequest, type EventDetails } from "./events-api";
-import { formatMoney, formatSignedMoney } from "./money";
+import { formatDisplayMoney, formatMoney, formatSignedMoney } from "./money";
 import {
   clearLocalState,
   isRecord,
@@ -103,6 +103,8 @@ export function Settlements({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [onlyMine, setOnlyMine] = useState(true);
+  const [revision, setRevision] = useState(0);
   const [confirm, setConfirm] = useState<{
     kind: "settle" | "cancel" | "send" | "confirm" | "not_received";
     transfer?: Transfer;
@@ -160,7 +162,7 @@ export function Settlements({
     };
     // Keep the prior settlement visible during a background refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, event.id, event.version]);
+  }, [token, event.id, event.version, revision]);
 
   const submit = async (request: Pending) => {
     if (inFlight.current) return;
@@ -195,6 +197,7 @@ export function Settlements({
               ? "Получение подтверждено."
               : "Отмечено, что перевод не получен. Отправителю нужно повторить отправку.",
         );
+        setRevision((value) => value + 1);
       }
       onChanged();
     } catch (reason) {
@@ -243,17 +246,27 @@ export function Settlements({
       },
     });
   };
+  const visibleTransfers = settlement?.transfers.filter((transfer) => !onlyMine || transfer.senderId === userId || transfer.receiverId === userId) ?? [];
+  const openTransfers = visibleTransfers.filter((transfer) => transfer.status !== "confirmed");
+  const incoming = openTransfers.filter((transfer) => transfer.receiverId === userId);
+  const outgoing = openTransfers.filter((transfer) => transfer.senderId === userId);
+  const between = openTransfers.filter((transfer) => transfer.senderId !== userId && transfer.receiverId !== userId);
+  const completed = visibleTransfers.filter((transfer) => transfer.status === "confirmed");
+  const renderTransfer = (transfer: Transfer) => {
+    const canSend = event.status === "settled" && transfer.senderId === userId && ["pending", "not_received"].includes(transfer.status);
+    const canReceive = event.status === "settled" && transfer.receiverId === userId && transfer.status === "sent";
+    return <li key={transfer.id} className="transfer-card"><div className="transfer-summary"><span>{transfer.senderName} → {transfer.receiverName}</span><strong>{formatDisplayMoney(transfer.amountKopecks)}</strong></div><small>{statusNames[transfer.status]}{transfer.confirmedAt ? ` · ${formatTime(transfer.confirmedAt)}` : ""}</small>{transfer.status === "not_received" && transfer.senderId === userId && <p className="transfer-warning">Получатель сообщил, что перевод не пришёл. Проверьте реквизиты и повторите отправку вне приложения.</p>}{(canSend || canReceive) && <div className="actions transfer-actions">{canSend && <button disabled={busy || pending !== null} onClick={() => begin("send", transfer)}>Я перевёл</button>}{canReceive && <><button disabled={busy || pending !== null} onClick={() => begin("confirm", transfer)}>Получено</button><button className="secondary" disabled={busy || pending !== null} onClick={() => begin("not_received", transfer)}>Не получил</button></>}</div>}</li>;
+  };
 
   return (
-    <section className="panel settlements-panel">
-      <div className="page-heading">
-        <h2>Расчёт</h2>
+    <section className="settlements-panel">
+      <div className="section-tools">
         <button
           className="small-button"
           disabled={loading || busy}
           onClick={() => onChanged()}
         >
-          {refreshing ? "Обновляем…" : "Обновить расчёт"}
+          {refreshing ? "Обновляем…" : "Обновить"}
         </button>
       </div>
       {loading && <p role="status">Загружаем расчёт…</p>}
@@ -292,6 +305,7 @@ export function Settlements({
           </button>
         </div>
       )}
+      <label className="filter-row"><span>Только с моим участием</span><input type="checkbox" role="switch" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} /></label>
 
       {!loading && event.status === "draft" && !settlement && (
         <>
@@ -316,8 +330,7 @@ export function Settlements({
 
       {settlement && (
         <>
-          <h3>Балансы</h3>
-          <ul className="balance-list">
+          <details className="balance-details"><summary>Балансы участников</summary><ul className="balance-list">
             {settlement.balances.map((balance) => (
               <li key={balance.userId}>
                 <span>{balance.displayName}</span>
@@ -338,90 +351,20 @@ export function Settlements({
                 </small>
               </li>
             ))}
-          </ul>
-          <h3>Переводы</h3>
+          </ul></details>
           <p className="payment-disclaimer">
             Приложение только сохраняет ваши отметки — оно не проводит и не
             проверяет банковские платежи.
           </p>
-          {settlement.transfers.length ? (
-            <ol className="transfer-list">
-              {settlement.transfers.map((transfer) => {
-                const canSend =
-                  event.status === "settled" &&
-                  transfer.senderId === userId &&
-                  ["pending", "not_received"].includes(transfer.status);
-                const canReceive =
-                  event.status === "settled" &&
-                  transfer.receiverId === userId &&
-                  transfer.status === "sent";
-                return (
-                  <li
-                    key={transfer.id}
-                    className={`transfer-${transfer.status}`}
-                  >
-                    <div className="transfer-summary">
-                      <span>
-                        {transfer.senderName} → {transfer.receiverName}
-                      </span>
-                      <strong>{formatMoney(transfer.amountKopecks)}</strong>
-                    </div>
-                    <span className="transfer-status">
-                      {statusNames[transfer.status]}
-                    </span>
-                    <small>
-                      {transfer.sentAt &&
-                        `Отправлено: ${formatTime(transfer.sentAt)}`}
-                      {transfer.notReceivedAt &&
-                        ` · Не получено: ${formatTime(transfer.notReceivedAt)}`}
-                      {transfer.confirmedAt &&
-                        ` · Подтверждено: ${formatTime(transfer.confirmedAt)}`}
-                    </small>
-                    {transfer.status === "not_received" &&
-                      transfer.senderId === userId && (
-                        <p className="transfer-warning">
-                          Получатель сообщил, что перевод не пришёл. Проверьте
-                          реквизиты и отправьте деньги снова вне приложения.
-                        </p>
-                      )}
-                    {(canSend || canReceive) && (
-                      <div className="actions transfer-actions">
-                        {canSend && (
-                          <button
-                            disabled={busy || pending !== null}
-                            onClick={() => begin("send", transfer)}
-                          >
-                            Отметить отправленным
-                          </button>
-                        )}
-                        {canReceive && (
-                          <>
-                            <button
-                              disabled={busy || pending !== null}
-                              onClick={() => begin("confirm", transfer)}
-                            >
-                              Получил
-                            </button>
-                            <button
-                              className="secondary"
-                              disabled={busy || pending !== null}
-                              onClick={() => begin("not_received", transfer)}
-                            >
-                              Не получил
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
-          ) : (
+          {incoming.length > 0 && <div className="transfer-group"><h3>Вам переведут</h3><ol className="transfer-list">{incoming.map(renderTransfer)}</ol></div>}
+          {outgoing.length > 0 && <div className="transfer-group"><h3>Вам нужно перевести</h3><ol className="transfer-list">{outgoing.map(renderTransfer)}</ol></div>}
+          {between.length > 0 && <div className="transfer-group"><h3>Между участниками</h3><ol className="transfer-list">{between.map(renderTransfer)}</ol></div>}
+          {completed.length > 0 && <details className="completed-group"><summary>Завершённые · {completed.length}</summary><ol className="transfer-list">{completed.map(renderTransfer)}</ol></details>}
+          {settlement.transfers.length === 0 ? (
             <p className="zero-result">
               Все балансы равны нулю — мероприятие завершено без переводов.
             </p>
-          )}
+          ) : visibleTransfers.length === 0 && <p className="zero-result">Переводов с вашим участием пока нет.</p>}
           {event.status === "completed" && settlement.transfers.length > 0 && (
             <p className="zero-result">
               Все переводы подтверждены. Мероприятие завершено.

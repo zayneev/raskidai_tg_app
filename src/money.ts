@@ -16,3 +16,8 @@ export function formatSignedMoney(amount: number): string {
   const sign = amount > 0 ? "+" : amount < 0 ? "−" : "";
   return `${sign}${formatMoney(Math.abs(amount))}`;
 }
+export function formatDisplayMoney(amount: number): string {
+  const rubles = Math.floor(Math.abs(amount) / 100).toLocaleString("ru-RU");
+  const kopecks = Math.abs(amount) % 100;
+  return `${amount < 0 ? "−" : ""}${rubles}${kopecks ? `,${String(kopecks).padStart(2, "0")}` : ""} ₽`;
+}

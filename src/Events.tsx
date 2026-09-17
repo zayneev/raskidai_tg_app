@@ -16,12 +16,25 @@ import {
   saveLocalState,
 } from "./local-state";
 import { RequestFailure, shouldKeepPendingMutation } from "./resilience";
+import { Logo, MoneySummary, useFinancials } from "./visual";
 
 const statusNames = {
   draft: "Собираем компанию",
   settled: "Расчёт зафиксирован",
   completed: "Завершено",
 };
+function participants(count: number) {
+  return count % 10 === 1 && count % 100 !== 11 ? "участник" : [2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100) ? "участника" : "участников";
+}
+function EventCard({ item, token, userId }: { item: EventSummary; token: string; userId: string }) {
+  const summary = useFinancials(token, item.id, userId, item.version);
+  return <a className="panel event-card" href={`#/events/${item.id}`}>
+    <h2>{item.title}</h2>
+    <p className="event-date">Дата мероприятия не указана</p>
+    <MoneySummary total={summary.total} paid={summary.paid} balance={summary.balance} loading={!summary.value && !summary.error} unavailable={!summary.value && !!summary.error} />
+    {summary.error && <small className="muted">Не удалось загрузить суммы</small>}
+  </a>;
+}
 function routeId() {
   return (
     window.location.hash.match(/^#\/events\/([a-f0-9-]{36})$/i)?.[1] ?? null
@@ -51,11 +64,13 @@ export function Events({
   userId,
   displayName,
   logout,
+  onReady,
 }: {
   token: string;
   userId: string;
   displayName: string;
   logout: () => Promise<void>;
+  onReady: () => void;
 }) {
   const [eventId, setEventId] = useState(routeId);
   const [events, setEvents] = useState<EventSummary[]>([]);
@@ -96,6 +111,8 @@ export function Events({
       loadLocalState(userId, null, "event-create", "pending", validPending),
   );
   const [online, setOnline] = useState(() => navigator.onLine);
+  const [tab, setTab] = useState<"expenses" | "transfers">("expenses");
+  const overview = useFinancials(token, eventId ?? "", userId, revision);
   const inFlight = useRef(false);
   const go = (id: string | null) => {
     window.location.hash = id ? `/events/${id}` : "/events";
@@ -108,6 +125,7 @@ export function Events({
       setLink("");
       setConfirm(null);
       setNotice("");
+      setTab("expenses");
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -121,6 +139,12 @@ export function Events({
       onOnlineChange: setOnline,
       onRefresh: () => setRevision((value) => value + 1),
     });
+  }, []);
+  useEffect(() => {
+    const update = () => document.documentElement.classList.toggle("keyboard-open", !!window.visualViewport && window.innerHeight - window.visualViewport.height > 130);
+    window.visualViewport?.addEventListener("resize", update);
+    update();
+    return () => { window.visualViewport?.removeEventListener("resize", update); document.documentElement.classList.remove("keyboard-open"); };
   }, []);
   useEffect(() => {
     setPendingMutation(
@@ -175,6 +199,7 @@ export function Events({
         if (active) {
           setLoading(false);
           setRefreshing(false);
+          onReady();
         }
       }
     };
@@ -275,18 +300,10 @@ export function Events({
   return (
     <main className="app events-app">
       <header className="header">
-        <a className="brand" href="#/events">
-          <span className="brand-icon">↗</span>раскидай
-        </a>
-        <button
-          className="small-button"
-          disabled={busy}
-          onClick={() => void logout()}
-        >
-          Выйти из аккаунта
-        </button>
+        {eventId ? <a className="header-control" href="#/events" aria-label="К мероприятиям">‹</a> : <span className="header-spacer" />}
+        <a className="brand" href="#/events" aria-label="раскидай — главная"><Logo /></a>
+        <details className="header-menu"><summary className="header-control" aria-label="Меню">···</summary><div className="header-menu-content"><span>{displayName}</span><button disabled={busy} onClick={() => void logout()}>Выйти</button></div></details>
       </header>
-      <p className="greeting">{displayName}</p>
       {!online && (
         <div className="offline-banner" role="status">
           Нет сети. Показаны последние загруженные данные; формы сохранены.
@@ -412,27 +429,11 @@ export function Events({
           </div>
         </section>
       )}
-      <div className="page-heading">
-        <h1>{eventId ? "Мероприятие" : "Мои мероприятия"}</h1>
-        <button
-          className="small-button"
-          disabled={loading || busy}
-          onClick={() => setRevision((v) => v + 1)}
-        >
-          {refreshing ? "Обновляем…" : "Обновить"}
-        </button>
-      </div>
-      {eventId && (
-        <a className="back-link" href="#/events">
-          ← Все мероприятия
-        </a>
-      )}
+      {!eventId && <div className="page-heading"><h1>Мои мероприятия</h1><button className="small-button" disabled={loading || busy} onClick={() => setRevision((v) => v + 1)}>{refreshing ? "Обновляем…" : "Обновить"}</button></div>}
       {loading && <p role="status">Загружаем…</p>}
       {!eventId && (
         <>
-          <button disabled={busy} onClick={() => setCreating((v) => !v)}>
-            {creating ? "Скрыть форму" : "+ Создать мероприятие"}
-          </button>
+          {creating && <button className="secondary" disabled={busy} onClick={() => setCreating(false)}>← К мероприятиям</button>}
           {creating && (
             <form
               className="panel event-form"
@@ -490,43 +491,34 @@ export function Events({
           )}
           {!loading && !error && events.length === 0 && (
             <section className="panel empty-state">
-              <span aria-hidden="true">↗</span>
               <h2>Всё начинается со встречи</h2>
               <p>Создайте мероприятие и пригласите друзей по ссылке.</p>
             </section>
           )}
           {!loading && (
             <div className="event-list">
-              {events.map((item) => (
-                <a
-                  className="panel event-card"
-                  href={`#/events/${item.id}`}
-                  key={item.id}
-                >
-                  <span className="badge">{statusNames[item.status]}</span>
-                  <h2>{item.title}</h2>
-                  <p>
-                    {item.memberCount} из 30 участников
-                    {item.creatorId === userId ? " · Вы создатель" : ""}
-                  </p>
-                  <span className="card-arrow" aria-hidden="true">
-                    ↗
-                  </span>
-                </a>
-              ))}
+              {events.map((item) => <EventCard key={item.id} item={item} token={token} userId={userId} />)}
             </div>
           )}
+          {!creating && <div className="bottom-bar"><button className="primary-action" disabled={busy} onClick={() => setCreating(true)}><span aria-hidden="true">＋</span> Новое мероприятие</button></div>}
         </>
       )}
       {!loading && event && (
         <>
-          <section className="panel">
-            <span className="badge">{statusNames[event.status]}</span>
-            <h2 className="event-title">{event.title}</h2>
-            {event.description && (
-              <p className="description">{event.description}</p>
-            )}
+          <section className="event-overview">
+            <h1 className="event-title">{event.title}</h1>
+            <p className="event-meta">Дата не указана · {event.members.length} {participants(event.members.length)}</p>
+            {event.description && <p className="description">{event.description}</p>}
+            <MoneySummary total={overview.total} paid={overview.paid} balance={overview.balance} loading={!overview.value && !overview.error} unavailable={!overview.value && !!overview.error} />
+            {overview.error && <p className="muted">Суммы недоступны: {overview.error}</p>}
           </section>
+          <div className="tabs" role="tablist" aria-label="Разделы мероприятия">
+            <button role="tab" aria-selected={tab === "expenses"} className={tab === "expenses" ? "active" : ""} onClick={() => setTab("expenses")}>Расходы</button>
+            <button role="tab" aria-selected={tab === "transfers"} className={tab === "transfers" ? "active" : ""} onClick={() => setTab("transfers")}>Переводы</button>
+          </div>
+          {tab === "expenses" ? <Expenses key={event.id} token={token} userId={userId} event={event} onChanged={() => setRevision((value) => value + 1)} /> : <Settlements token={token} userId={userId} event={event} onChanged={() => setRevision((value) => value + 1)} />}
+          <details className="event-management">
+            <summary>Участники и настройки · {statusNames[event.status]}</summary>
           <section className="panel">
             <h2>
               Участники <span className="muted">{event.members.length}/30</span>
@@ -643,18 +635,7 @@ export function Events({
               </div>
             </section>
           )}
-          <Expenses
-            key={event.id}
-            token={token}
-            userId={userId}
-            event={event}
-          />
-          <Settlements
-            token={token}
-            userId={userId}
-            event={event}
-            onChanged={() => setRevision((value) => value + 1)}
-          />
+          </details>
           <EventHistory
             token={token}
             eventId={event.id}
@@ -662,7 +643,6 @@ export function Events({
           />
         </>
       )}
-      <footer>Меньше подсчётов. Больше хороших встреч.</footer>
     </main>
   );
 }

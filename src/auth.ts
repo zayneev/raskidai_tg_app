@@ -4,7 +4,15 @@ import { requestJson, sessionExpiredEvent } from "./resilience";
 
 declare global {
   interface Window {
-    Telegram?: { WebApp: { initData: string; ready(): void; expand(): void } };
+    Telegram?: { WebApp: {
+      initData: string; ready(): void; expand(): void; requestFullscreen?(): void;
+      isVersionAtLeast?(version: string): boolean;
+      setHeaderColor?(color: string): void; setBackgroundColor?(color: string): void;
+      safeAreaInset?: { top: number; bottom: number; left: number; right: number };
+      contentSafeAreaInset?: { top: number; bottom: number; left: number; right: number };
+      onEvent?(name: string, handler: () => void): void;
+      offEvent?(name: string, handler: () => void): void;
+    } };
   }
 }
 type Session = {
@@ -75,15 +83,36 @@ export function useAuth() {
     let active = true;
     const app = window.Telegram?.WebApp;
     app?.ready();
+    const applyInsets = () => {
+      const safe = app?.safeAreaInset;
+      const content = app?.contentSafeAreaInset;
+      const root = document.documentElement;
+      root.style.setProperty("--tg-safe-top", `${(safe?.top ?? 0) + (content?.top ?? 0)}px`);
+      root.style.setProperty("--tg-safe-bottom", `${(safe?.bottom ?? 0) + (content?.bottom ?? 0)}px`);
+    };
+    applyInsets();
+    app?.onEvent?.("safeAreaChanged", applyInsets);
+    app?.onEvent?.("contentSafeAreaChanged", applyInsets);
+    const fullscreenFallback = () => app?.expand();
+    app?.onEvent?.("fullscreenFailed", fullscreenFallback);
+    if (app?.isVersionAtLeast?.("6.1") ?? true) {
+      app?.setHeaderColor?.("#F5F3EE");
+      app?.setBackgroundColor?.("#F5F3EE");
+    }
+    try { if (app?.requestFullscreen && (app.isVersionAtLeast?.("8.0") ?? true)) app.requestFullscreen(); else app?.expand(); } catch { app?.expand(); }
+    const cleanup = () => {
+      app?.offEvent?.("safeAreaChanged", applyInsets);
+      app?.offEvent?.("contentSafeAreaChanged", applyInsets);
+      app?.offEvent?.("fullscreenFailed", fullscreenFallback);
+    };
     if (!app?.initData) {
       setState({ status: "outside" });
-      return;
+      return cleanup;
     }
     if (!baseUrl) {
       setState({ status: "unconfigured" });
-      return;
+      return cleanup;
     }
-    app.expand();
     setState({ status: "loading" });
     const session =
       currentSession && Date.parse(currentSession.expiresAt) > Date.now()
@@ -105,6 +134,7 @@ export function useAuth() {
       });
     return () => {
       active = false;
+      cleanup();
     };
   }, [attempt]);
   useEffect(() => {
