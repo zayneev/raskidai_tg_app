@@ -1,3 +1,5 @@
+import type { EventCategory } from "./event-categories";
+
 export type EventSummary = {
   id: string;
   title: string;
@@ -7,6 +9,8 @@ export type EventSummary = {
   version: number;
   memberCount: number;
   createdAt?: string;
+  category: EventCategory;
+  eventDate: string | null;
 };
 export type EventDetails = Omit<EventSummary, "memberCount"> & {
   members: { id: string; displayName: string; joinedAt: string }[];
@@ -44,6 +48,7 @@ const reads = new Set([
   "expenses.list",
   "expenses.history",
   "settlements.get",
+  "settlements.preview",
   "history.list",
 ]);
 const inFlightReads = new Map<string, Promise<unknown>>();

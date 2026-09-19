@@ -16,6 +16,7 @@
     "smoke": "node --experimental-strip-types scripts/smoke-check.ts"
   },
   "dependencies": {
+    "motion": "^13.4.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

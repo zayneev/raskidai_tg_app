@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import * as m from "motion/react-m";
 import { eventRequest, type EventDetails } from "./events-api";
 import { formatDisplayMoney, formatMoney, formatSignedMoney } from "./money";
 import {
@@ -8,39 +9,14 @@ import {
   saveLocalState,
 } from "./local-state";
 import { RequestFailure, shouldKeepPendingMutation } from "./resilience";
+import { BottomSheet } from "./ui";
+import type {
+  ProposedTransfer,
+  SettlementPreview,
+  SettlementRecord,
+  TransferRecord,
+} from "./visual";
 
-type Balance = {
-  userId: string;
-  displayName: string;
-  paidKopecks: number;
-  shareKopecks: number;
-  balanceKopecks: number;
-};
-type Transfer = {
-  id: string;
-  sequence: number;
-  senderId: string;
-  senderName: string;
-  receiverId: string;
-  receiverName: string;
-  amountKopecks: number;
-  status: "pending" | "sent" | "confirmed" | "not_received";
-  active: boolean;
-  sentAt: string | null;
-  confirmedAt: string | null;
-  notReceivedAt: string | null;
-};
-type Settlement = {
-  id: string;
-  eventId: string;
-  sourceEventVersion: number;
-  active: boolean;
-  createdAt: string;
-  cancelledAt: string | null;
-  transfersStartedAt: string | null;
-  balances: Balance[];
-  transfers: Transfer[];
-};
 type Pending = {
   action:
     | "settlements.settle"
@@ -55,6 +31,7 @@ type Pending = {
     transferId?: string;
   };
 };
+
 const uuid = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const validPending = (value: unknown): value is Pending =>
   isRecord(value) &&
@@ -71,7 +48,7 @@ const validPending = (value: unknown): value is Pending =>
   uuid.test(value.data.requestId) &&
   Number.isInteger(value.data.eventVersion);
 
-const statusNames: Record<Transfer["status"], string> = {
+const statusNames: Record<TransferRecord["status"], string> = {
   pending: "Ожидает отправки",
   sent: "Отмечен отправленным",
   confirmed: "Получение подтверждено",
@@ -97,19 +74,18 @@ export function Settlements({
   event: EventDetails;
   onChanged: () => void;
 }) {
-  const [settlement, setSettlement] = useState<Settlement | null>(null);
+  const [settlement, setSettlement] = useState<SettlementRecord | null>(null);
+  const [preview, setPreview] = useState<SettlementPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [onlyMine, setOnlyMine] = useState(true);
   const [revision, setRevision] = useState(0);
   const [confirm, setConfirm] = useState<{
     kind: "settle" | "cancel" | "send" | "confirm" | "not_received";
-    transfer?: Transfer;
+    transfer?: TransferRecord;
   } | null>(null);
-  // Keep the exact request ID and body until an ambiguous network result is resolved.
   const [pending, setPending] = useState<Pending | null>(() =>
     loadLocalState(
       userId,
@@ -120,34 +96,35 @@ export function Settlements({
     ),
   );
   const inFlight = useRef(false);
-  const hasAvailableTransferAction = settlement?.transfers.some(
-    (transfer) =>
-      (transfer.senderId === userId &&
-        ["pending", "not_received"].includes(transfer.status)) ||
-      (transfer.receiverId === userId && transfer.status === "sent"),
-  );
 
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
-    if (!settlement) setLoading(true);
+    if (!settlement && !preview) setLoading(true);
     else setRefreshing(true);
     setError("");
-    eventRequest<{ settlement: Settlement | null }>(
-      token,
-      "settlements.get",
-      {
-        eventId: event.id,
-      },
-      { signal: controller.signal },
-    )
+    const action =
+      event.status === "draft" ? "settlements.preview" : "settlements.get";
+    eventRequest<{
+      preview?: SettlementPreview;
+      settlement?: SettlementRecord | null;
+    }>(token, action, { eventId: event.id }, { signal: controller.signal })
       .then((result) => {
-        if (active) setSettlement(result.settlement);
+        if (!active) return;
+        if (action === "settlements.preview") {
+          setPreview(result.preview ?? null);
+          setSettlement(null);
+        } else {
+          setSettlement(result.settlement ?? null);
+          setPreview(null);
+        }
       })
       .catch((reason) => {
         if (active && (reason as RequestFailure)?.kind !== "cancelled")
           setError(
-            reason instanceof Error ? reason.message : "Ошибка загрузки.",
+            reason instanceof Error
+              ? reason.message
+              : "Не удалось загрузить расчёт.",
           );
       })
       .finally(() => {
@@ -160,9 +137,9 @@ export function Settlements({
       active = false;
       controller.abort();
     };
-    // Keep the prior settlement visible during a background refresh.
+    // Keep prior calculation visible during refreshes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, event.id, event.version, revision]);
+  }, [token, event.id, event.status, event.version, revision]);
 
   const submit = async (request: Pending) => {
     if (inFlight.current) return;
@@ -173,37 +150,40 @@ export function Settlements({
     setPending(request);
     saveLocalState(userId, event.id, "settlement-mutation", "pending", request);
     try {
-      const result = await eventRequest<{
-        settlement?: Settlement;
-      }>(token, request.action, request.data);
-      setPending(null);
+      const result = await eventRequest<{ settlement?: SettlementRecord }>(
+        token,
+        request.action,
+        request.data,
+      );
       clearLocalState(userId, event.id, "settlement-mutation", "pending");
+      setPending(null);
       setConfirm(null);
       if (request.action === "settlements.settle") {
         setSettlement(result.settlement ?? null);
+        setPreview(null);
         setNotice(
-          result.settlement?.transfers.length === 0
-            ? "Расчёт зафиксирован. Мероприятие завершено без переводов."
-            : "Расчёт зафиксирован. Расходы и состав участников заблокированы.",
+          result.settlement?.transfers.length
+            ? "Расчёт зафиксирован. Расходы заблокированы."
+            : "Расчёт завершён без переводов.",
         );
       } else if (request.action === "settlements.cancel") {
         setSettlement(null);
-        setNotice("Расчёт отменён. Расходы и приглашения снова доступны.");
+        setNotice("Расчёт отменён. Расходы снова доступны.");
       } else {
         setNotice(
           request.action === "transfers.send"
-            ? "Отметка отправки сохранена. Приложение не проверяет банковский платёж."
+            ? "Отправка отмечена."
             : request.action === "transfers.confirm"
               ? "Получение подтверждено."
-              : "Отмечено, что перевод не получен. Отправителю нужно повторить отправку.",
+              : "Отмечено, что перевод не получен.",
         );
-        setRevision((value) => value + 1);
       }
+      setRevision((value) => value + 1);
       onChanged();
     } catch (reason) {
       if (!shouldKeepPendingMutation(reason)) {
-        setPending(null);
         clearLocalState(userId, event.id, "settlement-mutation", "pending");
+        setPending(null);
       }
       setError(
         reason instanceof Error
@@ -218,15 +198,11 @@ export function Settlements({
 
   const begin = (
     kind: "settle" | "cancel" | "send" | "confirm" | "not_received",
-    transfer?: Transfer,
-  ) => {
-    setError("");
-    setNotice("");
-    setConfirm({ kind, transfer });
-  };
+    transfer?: TransferRecord,
+  ) => setConfirm({ kind, transfer });
   const confirmed = () => {
     if (!confirm) return;
-    const transferActions = {
+    const actions = {
       send: "transfers.send",
       confirm: "transfers.confirm",
       not_received: "transfers.not_received",
@@ -237,7 +213,7 @@ export function Settlements({
           ? "settlements.settle"
           : confirm.kind === "cancel"
             ? "settlements.cancel"
-            : transferActions[confirm.kind],
+            : actions[confirm.kind],
       data: {
         eventId: event.id,
         eventVersion: event.version,
@@ -246,83 +222,227 @@ export function Settlements({
       },
     });
   };
-  const visibleTransfers = settlement?.transfers.filter((transfer) => !onlyMine || transfer.senderId === userId || transfer.receiverId === userId) ?? [];
-  const openTransfers = visibleTransfers.filter((transfer) => transfer.status !== "confirmed");
-  const incoming = openTransfers.filter((transfer) => transfer.receiverId === userId);
-  const outgoing = openTransfers.filter((transfer) => transfer.senderId === userId);
-  const between = openTransfers.filter((transfer) => transfer.senderId !== userId && transfer.receiverId !== userId);
-  const completed = visibleTransfers.filter((transfer) => transfer.status === "confirmed");
-  const renderTransfer = (transfer: Transfer) => {
-    const canSend = event.status === "settled" && transfer.senderId === userId && ["pending", "not_received"].includes(transfer.status);
-    const canReceive = event.status === "settled" && transfer.receiverId === userId && transfer.status === "sent";
-    return <li key={transfer.id} className="transfer-card"><div className="transfer-summary"><span>{transfer.senderName} → {transfer.receiverName}</span><strong>{formatDisplayMoney(transfer.amountKopecks)}</strong></div><small>{statusNames[transfer.status]}{transfer.confirmedAt ? ` · ${formatTime(transfer.confirmedAt)}` : ""}</small>{transfer.status === "not_received" && transfer.senderId === userId && <p className="transfer-warning">Получатель сообщил, что перевод не пришёл. Проверьте реквизиты и повторите отправку вне приложения.</p>}{(canSend || canReceive) && <div className="actions transfer-actions">{canSend && <button disabled={busy || pending !== null} onClick={() => begin("send", transfer)}>Я перевёл</button>}{canReceive && <><button disabled={busy || pending !== null} onClick={() => begin("confirm", transfer)}>Получено</button><button className="secondary" disabled={busy || pending !== null} onClick={() => begin("not_received", transfer)}>Не получил</button></>}</div>}</li>;
+
+  const balances = settlement?.balances ?? preview?.balances ?? [];
+  const personalBalance = balances.find((balance) => balance.userId === userId);
+  const proposed = preview?.transfers ?? [];
+  const openTransfers =
+    settlement?.transfers.filter(
+      (transfer) => transfer.status !== "confirmed",
+    ) ?? [];
+  const outgoing = openTransfers.filter(
+    (transfer) => transfer.senderId === userId,
+  );
+  const incoming = openTransfers.filter(
+    (transfer) => transfer.receiverId === userId,
+  );
+  const between = openTransfers.filter(
+    (transfer) =>
+      transfer.senderId !== userId && transfer.receiverId !== userId,
+  );
+  const completed =
+    settlement?.transfers.filter(
+      (transfer) => transfer.status === "confirmed",
+    ) ?? [];
+
+  const renderProposed = (transfer: ProposedTransfer) => (
+    <li
+      className="transfer-card proposed-transfer"
+      key={`${transfer.sequence}:${transfer.senderId}:${transfer.receiverId}`}
+    >
+      <div className="transfer-summary">
+        <span>
+          {transfer.senderName} → {transfer.receiverName}
+        </span>
+        <strong>{formatDisplayMoney(transfer.amountKopecks)}</strong>
+      </div>
+      <small>После фиксации расчёта</small>
+    </li>
+  );
+  const renderTransfer = (transfer: TransferRecord) => {
+    const canSend =
+      event.status === "settled" &&
+      transfer.senderId === userId &&
+      ["pending", "not_received"].includes(transfer.status);
+    const canReceive =
+      event.status === "settled" &&
+      transfer.receiverId === userId &&
+      transfer.status === "sent";
+    return (
+      <m.li
+        className="transfer-card"
+        key={transfer.id}
+        layout
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+      >
+        <div className="transfer-summary">
+          <span>
+            {transfer.senderName} → {transfer.receiverName}
+          </span>
+          <strong>{formatDisplayMoney(transfer.amountKopecks)}</strong>
+        </div>
+        <small>
+          {statusNames[transfer.status]}
+          {transfer.confirmedAt ? ` · ${formatTime(transfer.confirmedAt)}` : ""}
+        </small>
+        {transfer.status === "not_received" && transfer.senderId === userId && (
+          <p className="transfer-warning">
+            Получатель сообщил, что деньги не пришли. Проверьте перевод перед
+            повторной отметкой.
+          </p>
+        )}
+        {(canSend || canReceive) && (
+          <div className="actions transfer-actions">
+            {canSend && (
+              <button
+                disabled={busy || pending !== null}
+                onClick={() => begin("send", transfer)}
+              >
+                Я перевёл
+              </button>
+            )}
+            {canReceive && (
+              <>
+                <button
+                  disabled={busy || pending !== null}
+                  onClick={() => begin("confirm", transfer)}
+                >
+                  Получено
+                </button>
+                <button
+                  className="secondary"
+                  disabled={busy || pending !== null}
+                  onClick={() => begin("not_received", transfer)}
+                >
+                  Не получил
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </m.li>
+    );
   };
 
   return (
     <section className="settlements-panel">
-      <div className="section-tools">
+      <div className="calculation-heading">
+        <div>
+          <span className="eyebrow">
+            {event.status === "draft"
+              ? "Предварительный расчёт"
+              : event.status === "completed"
+                ? "Расчёты завершены"
+                : "Расчёт зафиксирован"}
+          </span>
+          <h2>Ваш результат</h2>
+        </div>
         <button
-          className="small-button"
+          className="icon-refresh"
           disabled={loading || busy}
-          onClick={() => onChanged()}
+          onClick={() => setRevision((value) => value + 1)}
+          aria-label="Обновить расчёт"
         >
-          {refreshing ? "Обновляем…" : "Обновить"}
+          {refreshing ? "…" : "↻"}
         </button>
       </div>
-      {loading && <p role="status">Загружаем расчёт…</p>}
+      {loading && !balances.length && <p role="status">Считаем результат…</p>}
       {error && (
         <div className="error-box" role="alert">
           <p>{error}</p>
-          <button className="secondary" disabled={busy} onClick={onChanged}>
-            Повторить загрузку
-          </button>
-        </div>
-      )}
-      {notice && <p role="status">{notice}</p>}
-      {pending && (
-        <div className="confirmation">
-          <p>
-            Ответ сервера неизвестен. Сохранены исходные данные и requestId —
-            повтор безопасен.
-          </p>
-          <button disabled={busy} onClick={() => void submit(pending)}>
-            Повторить тот же запрос
-          </button>
           <button
             className="secondary"
-            disabled={busy}
-            onClick={() => {
-              clearLocalState(
-                userId,
-                event.id,
-                "settlement-mutation",
-                "pending",
-              );
-              setPending(null);
-            }}
+            onClick={() => setRevision((value) => value + 1)}
           >
-            Не повторять
+            Повторить
           </button>
         </div>
       )}
-      <label className="filter-row"><span>Только с моим участием</span><input type="checkbox" role="switch" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} /></label>
-
-      {!loading && event.status === "draft" && !settlement && (
-        <>
-          <p>
-            После фиксации расходы, приглашение и состав участников нельзя будет
-            менять до разрешённого возврата к редактированию.
-          </p>
-          {event.creatorId === userId ? (
+      {notice && (
+        <p className="notice" role="status">
+          {notice}
+        </p>
+      )}
+      {pending && !busy && (
+        <div className="confirmation">
+          <p>Ответ сервера неизвестен. Повтор использует тот же requestId.</p>
+          <div className="actions">
+            <button onClick={() => void submit(pending)}>Повторить</button>
             <button
-              disabled={busy || pending !== null}
-              onClick={() => begin("settle")}
+              className="secondary"
+              onClick={() => {
+                clearLocalState(
+                  userId,
+                  event.id,
+                  "settlement-mutation",
+                  "pending",
+                );
+                setPending(null);
+              }}
             >
-              Раскидать
+              Не повторять
             </button>
+          </div>
+        </div>
+      )}
+
+      {personalBalance && (
+        <m.div className="personal-balance" layout>
+          <span>
+            {personalBalance.balanceKopecks > 0
+              ? "Вам вернут"
+              : personalBalance.balanceKopecks < 0
+                ? "Вы должны"
+                : "Баланс"}
+          </span>
+          <strong>
+            {formatDisplayMoney(Math.abs(personalBalance.balanceKopecks))}
+          </strong>
+          <small>
+            Вы оплатили {formatMoney(personalBalance.paidKopecks)} · ваша доля{" "}
+            {formatMoney(personalBalance.shareKopecks)}
+          </small>
+        </m.div>
+      )}
+
+      {balances.length > 0 && (
+        <details className="balance-details">
+          <summary>Балансы участников</summary>
+          <ul className="balance-list">
+            {balances.map((balance) => (
+              <li key={balance.userId}>
+                <span>{balance.displayName}</span>
+                <strong>{formatSignedMoney(balance.balanceKopecks)}</strong>
+                <small>
+                  оплачено {formatMoney(balance.paidKopecks)} · доля{" "}
+                  {formatMoney(balance.shareKopecks)}
+                </small>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {event.status === "draft" && preview && (
+        <>
+          <div className="calculation-note">
+            <strong>Расчёт меняется вместе с расходами</strong>
+            <p>Переводы станут задачами участников после фиксации.</p>
+          </div>
+          {proposed.length ? (
+            <div className="transfer-group">
+              <h3>Предполагаемые переводы</h3>
+              <ol className="transfer-list">{proposed.map(renderProposed)}</ol>
+            </div>
           ) : (
+            <p className="zero-result">
+              Все балансы равны нулю — переводы не потребуются.
+            </p>
+          )}
+          {event.creatorId !== userId && (
             <p className="muted">
-              Зафиксировать расчёт может только создатель.
+              Зафиксировать расчёт может создатель мероприятия.
             </p>
           )}
         </>
@@ -330,106 +450,112 @@ export function Settlements({
 
       {settlement && (
         <>
-          <details className="balance-details"><summary>Балансы участников</summary><ul className="balance-list">
-            {settlement.balances.map((balance) => (
-              <li key={balance.userId}>
-                <span>{balance.displayName}</span>
-                <strong
-                  className={
-                    balance.balanceKopecks > 0
-                      ? "positive"
-                      : balance.balanceKopecks < 0
-                        ? "negative"
-                        : ""
-                  }
-                >
-                  {formatSignedMoney(balance.balanceKopecks)}
-                </strong>
-                <small>
-                  оплачено {formatMoney(balance.paidKopecks)} · доля{" "}
-                  {formatMoney(balance.shareKopecks)}
-                </small>
-              </li>
-            ))}
-          </ul></details>
           <p className="payment-disclaimer">
-            Приложение только сохраняет ваши отметки — оно не проводит и не
-            проверяет банковские платежи.
+            Приложение сохраняет отметки, но не проводит и не проверяет
+            банковские платежи.
           </p>
-          {incoming.length > 0 && <div className="transfer-group"><h3>Вам переведут</h3><ol className="transfer-list">{incoming.map(renderTransfer)}</ol></div>}
-          {outgoing.length > 0 && <div className="transfer-group"><h3>Вам нужно перевести</h3><ol className="transfer-list">{outgoing.map(renderTransfer)}</ol></div>}
-          {between.length > 0 && <div className="transfer-group"><h3>Между участниками</h3><ol className="transfer-list">{between.map(renderTransfer)}</ol></div>}
-          {completed.length > 0 && <details className="completed-group"><summary>Завершённые · {completed.length}</summary><ol className="transfer-list">{completed.map(renderTransfer)}</ol></details>}
-          {settlement.transfers.length === 0 ? (
-            <p className="zero-result">
-              Все балансы равны нулю — мероприятие завершено без переводов.
-            </p>
-          ) : visibleTransfers.length === 0 && <p className="zero-result">Переводов с вашим участием пока нет.</p>}
+          {outgoing.length > 0 && (
+            <div className="transfer-group">
+              <h3>Вам нужно перевести</h3>
+              <ol className="transfer-list">{outgoing.map(renderTransfer)}</ol>
+            </div>
+          )}
+          {incoming.length > 0 && (
+            <div className="transfer-group">
+              <h3>Вам переведут</h3>
+              <ol className="transfer-list">{incoming.map(renderTransfer)}</ol>
+            </div>
+          )}
+          {between.length > 0 && (
+            <details className="completed-group">
+              <summary>Между участниками · {between.length}</summary>
+              <ol className="transfer-list">{between.map(renderTransfer)}</ol>
+            </details>
+          )}
+          {completed.length > 0 && (
+            <details className="completed-group">
+              <summary>Завершённые · {completed.length}</summary>
+              <ol className="transfer-list">{completed.map(renderTransfer)}</ol>
+            </details>
+          )}
+          {settlement.transfers.length === 0 && (
+            <p className="zero-result">Мероприятие завершено без переводов.</p>
+          )}
           {event.status === "completed" && settlement.transfers.length > 0 && (
-            <p className="zero-result">
-              Все переводы подтверждены. Мероприятие завершено.
-            </p>
+            <p className="zero-result">Все переводы подтверждены.</p>
           )}
           {event.creatorId === userId &&
             event.status === "settled" &&
             !settlement.transfersStartedAt && (
               <button
-                className="secondary"
+                className="secondary standalone-action"
                 disabled={busy || pending !== null}
                 onClick={() => begin("cancel")}
               >
                 Вернуться к редактированию
               </button>
             )}
-          {event.status === "settled" &&
-            !hasAvailableTransferAction &&
-            !(event.creatorId === userId && !settlement.transfersStartedAt) && (
-              <p className="muted">
-                Сейчас у вас нет доступных действий. Обновите карточку после
-                действий других участников.
-              </p>
-            )}
         </>
       )}
 
-      {confirm && (
-        <div className="confirmation" role="alert">
-          <h3>
-            {confirm.kind === "settle"
-              ? "Зафиксировать расчёт?"
-              : confirm.kind === "cancel"
-                ? "Вернуться к редактированию?"
-                : confirm.kind === "send"
-                  ? "Отметить перевод отправленным?"
-                  : confirm.kind === "confirm"
-                    ? "Подтвердить получение?"
-                    : "Сообщить, что перевод не получен?"}
-          </h3>
-          <p>
-            {confirm.kind === "settle"
-              ? "Будет сохранён неизменяемый снимок расходов и долей. Новые расходы, приглашения, вход и выход участников будут заблокированы."
-              : confirm.kind === "cancel"
-                ? "Текущий расчёт и переводы останутся в истории, но станут неактивными. Расходы и приглашения снова можно будет менять."
-                : confirm.kind === "send"
-                  ? "Подтвердите только после реальной отправки денег в банковском приложении. Раскидай не проводит и не проверяет платёж."
-                  : confirm.kind === "confirm"
-                    ? "Подтвердите, что деньги действительно поступили. После подтверждения перевод изменить нельзя."
-                    : "Отправитель увидит, что деньги не пришли, и сможет повторно отметить перевод отправленным после новой попытки."}
-          </p>
-          <div className="actions">
-            <button disabled={busy} onClick={confirmed}>
-              Подтвердить
-            </button>
-            <button
-              className="secondary"
-              disabled={busy}
-              onClick={() => setConfirm(null)}
-            >
-              Отмена
-            </button>
-          </div>
+      {event.status === "draft" && event.creatorId === userId && preview && (
+        <div className="floating-action">
+          <m.button
+            className="primary-action"
+            disabled={busy || pending !== null}
+            onClick={() => begin("settle")}
+            whileTap={{ scale: 0.98 }}
+          >
+            Зафиксировать расчёт
+          </m.button>
         </div>
       )}
+
+      <BottomSheet
+        open={confirm !== null}
+        onClose={() => setConfirm(null)}
+        title="Подтверждение"
+        className="confirmation-sheet"
+      >
+        {confirm && (
+          <>
+            <h2>
+              {confirm.kind === "settle"
+                ? "Зафиксировать расчёт?"
+                : confirm.kind === "cancel"
+                  ? "Вернуться к редактированию?"
+                  : confirm.kind === "send"
+                    ? "Отметить перевод отправленным?"
+                    : confirm.kind === "confirm"
+                      ? "Подтвердить получение?"
+                      : "Сообщить, что перевод не получен?"}
+            </h2>
+            <p>
+              {confirm.kind === "settle"
+                ? "Расходы, приглашение и состав участников будут заблокированы."
+                : confirm.kind === "cancel"
+                  ? "Расходы снова можно будет изменять."
+                  : confirm.kind === "send"
+                    ? "Подтвердите действие после реальной отправки денег."
+                    : confirm.kind === "confirm"
+                      ? "После подтверждения перевод изменить нельзя."
+                      : "Отправитель увидит, что деньги не пришли."}
+            </p>
+            <div className="actions">
+              <button disabled={busy} onClick={confirmed}>
+                Подтвердить
+              </button>
+              <button
+                className="secondary"
+                disabled={busy}
+                onClick={() => setConfirm(null)}
+              >
+                Отмена
+              </button>
+            </div>
+          </>
+        )}
+      </BottomSheet>
     </section>
   );
 }

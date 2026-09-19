@@ -59,6 +59,45 @@ test("join accepts only invitation capability, hashes it on server", async () =>
     400,
   );
 });
+test("creation forwards category and date and atomically provisions an invitation", async () => {
+  let invitationHash = "";
+  const handler = createEventsHandler({
+    allowedOrigins: [],
+    invitationSecret: "stable-create-secret",
+    rpc: async (name, args) => {
+      assert.equal(name, "event_action");
+      const data = args.p_data as Record<string, unknown>;
+      invitationHash = String(data.invitationHash);
+      assert.deepEqual(
+        { ...data, invitationHash: "redacted" },
+        {
+          title: "Выходные у озера",
+          description: "Берём палатки",
+          category: "leisure",
+          eventDate: "2026-09-26",
+          requestId,
+          invitationHash: "redacted",
+        },
+      );
+      return { eventId: id };
+    },
+  });
+  const response = await handler(
+    request({
+      action: "create",
+      title: "Выходные у озера",
+      description: "Берём палатки",
+      category: "leisure",
+      eventDate: "2026-09-26",
+      requestId,
+      creatorId: "forged",
+    }),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.match(body.invitation, /^[a-f0-9]{64}$/);
+  assert.equal(invitationHash, await sha256(body.invitation));
+});
 test("rotation generates random tokens and never exposes hash", async () => {
   const hashes: string[] = [];
   const handler = createEventsHandler({

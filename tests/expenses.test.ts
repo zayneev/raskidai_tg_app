@@ -74,6 +74,38 @@ test("settlement HTTP routes exact allowed fields and strips forged result", asy
     assert.equal(response.status, 200);
   }
 });
+test("settlement preview uses a read-only dedicated RPC", async () => {
+  const token = "a".repeat(64);
+  const eventId = "00000000-0000-4000-8000-000000000001";
+  const handler = createEventsHandler({
+    allowedOrigins: [],
+    rpc: async (name, args) => {
+      assert.equal(name, "settlement_preview_action");
+      assert.equal(args.p_action, undefined);
+      assert.deepEqual(args.p_data, { eventId });
+      return {
+        preview: { sourceEventVersion: 4, balances: [], transfers: [] },
+      };
+    },
+  });
+  const response = await handler(
+    new Request("https://test/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        action: "settlements.preview",
+        eventId,
+        requestId: "forged",
+        eventVersion: 999,
+        balances: [{ userId: "forged" }],
+      }),
+    }),
+  );
+  assert.equal(response.status, 200);
+});
 test("expense HTTP routes all actions to transactional RPC and strips identity", async () => {
   const token = "a".repeat(64);
   for (const action of ["list", "history", "create", "update", "delete"]) {

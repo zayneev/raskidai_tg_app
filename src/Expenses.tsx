@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import { AnimatePresence } from "motion/react";
+import * as m from "motion/react-m";
 import { eventRequest, type EventDetails } from "./events-api";
-import { formatDisplayMoney, formatMoney, parseRubles, rublesInput } from "./money";
+import {
+  formatDisplayMoney,
+  formatMoney,
+  parseRubles,
+  rublesInput,
+} from "./money";
 import {
   clearLocalState,
   isRecord,
@@ -8,18 +15,24 @@ import {
   saveLocalState,
 } from "./local-state";
 import { RequestFailure, shouldKeepPendingMutation } from "./resilience";
+import { BottomSheet, ScreenHeader, pageTransition } from "./ui";
 import type { ExpenseRecord } from "./visual";
 
 type Expense = ExpenseRecord;
-type Pending = { action: string; data: Record<string, unknown> };
+type Pending = {
+  action: "expenses.create" | "expenses.update" | "expenses.delete";
+  data: Record<string, unknown> & { requestId: string };
+};
 type ExpenseDraft = {
   mode: "new" | "edit";
-  expense: Expense | null;
+  expenseId: string | null;
+  expenseVersion: number | null;
   title: string;
   amount: string;
   selected: string[];
   eventVersion: number;
 };
+
 const uuid = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const validPending = (value: unknown): value is Pending =>
   isRecord(value) &&
@@ -28,68 +41,65 @@ const validPending = (value: unknown): value is Pending =>
   ) &&
   isRecord(value.data) &&
   typeof value.data.requestId === "string" &&
-  uuid.test(value.data.requestId) &&
-  typeof value.data.eventId === "string";
-const validExpense = (value: unknown): value is Expense =>
-  isRecord(value) &&
-  typeof value.id === "string" &&
-  typeof value.author_id === "string" &&
-  typeof value.author_name === "string" &&
-  typeof value.title === "string" &&
-  Number.isSafeInteger(value.amount_kopecks) &&
-  Number.isInteger(value.version) &&
-  Array.isArray(value.shares);
+  uuid.test(value.data.requestId);
 const validDraft = (value: unknown): value is ExpenseDraft =>
   isRecord(value) &&
-  (value.mode === "new" || value.mode === "edit") &&
+  ["new", "edit"].includes(String(value.mode)) &&
+  ((value.mode === "new" &&
+    value.expenseId === null &&
+    value.expenseVersion === null) ||
+    (value.mode === "edit" &&
+      typeof value.expenseId === "string" &&
+      Number.isInteger(value.expenseVersion))) &&
   typeof value.title === "string" &&
   value.title.length <= 120 &&
   typeof value.amount === "string" &&
+  value.amount.length <= 20 &&
   Array.isArray(value.selected) &&
   value.selected.every((id) => typeof id === "string") &&
-  Number.isInteger(value.eventVersion) &&
-  ((value.mode === "new" && value.expense === null) ||
-    (value.mode === "edit" && validExpense(value.expense)));
+  Number.isInteger(value.eventVersion);
+
 export function Expenses({
   token,
   userId,
   event,
+  onlyMine,
+  onOnlyMine,
   onChanged,
 }: {
   token: string;
   userId: string;
   event: EventDetails;
+  onlyMine: boolean;
+  onOnlyMine: (value: boolean) => void;
   onChanged: () => void;
 }) {
+  const restoredDraft = useRef(
+    loadLocalState(userId, event.id, "expense-form", "draft", validDraft),
+  );
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
-  const restored = useRef(
-    loadLocalState(userId, event.id, "expense-form", "draft", validDraft),
+  const [form, setForm] = useState<"new" | Expense | null>(
+    restoredDraft.current?.mode === "new" ? "new" : null,
   );
-  const restoredExpense = restored.current?.expense as Expense | null;
-  const [form, setForm] = useState<Expense | "new" | null>(
-    restored.current
-      ? restored.current.mode === "new"
-        ? "new"
-        : restoredExpense
-      : null,
-  );
-  const [title, setTitle] = useState(restored.current?.title ?? "");
-  const [amount, setAmount] = useState(restored.current?.amount ?? "");
-  const [selected, setSelected] = useState<string[]>(
-    (restored.current?.selected ?? []).filter((id) =>
-      event.members.some((member) => member.id === id),
-    ),
-  );
-  const [deleting, setDeleting] = useState<Expense | null>(null);
   const [detail, setDetail] = useState<Expense | null>(null);
-  const [onlyMine, setOnlyMine] = useState(false);
-  // A failed/ambiguous request is retried with the exact payload and UUID.
+  const [deleting, setDeleting] = useState<Expense | null>(null);
+  const [title, setTitle] = useState(restoredDraft.current?.title ?? "");
+  const [amount, setAmount] = useState(restoredDraft.current?.amount ?? "");
+  const [selected, setSelected] = useState<string[]>(
+    restoredDraft.current?.selected ?? event.members.map((member) => member.id),
+  );
+  const editingVersion = useRef(
+    restoredDraft.current?.eventVersion ?? event.version,
+  );
+  const editingExpenseVersion = useRef<number | null>(
+    restoredDraft.current?.expenseVersion ?? null,
+  );
   const [pending, setPending] = useState<Pending | null>(() =>
     loadLocalState(
       userId,
@@ -99,32 +109,31 @@ export function Expenses({
       validPending,
     ),
   );
-  const editingVersion = useRef(
-    restored.current?.eventVersion ?? event.version,
-  );
+  const [newExpenseId, setNewExpenseId] = useState<string | null>(null);
   const inFlight = useRef(false);
+  const locked = event.status !== "draft";
+
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
     if (!expenses.length) setLoading(true);
     else setRefreshing(true);
+    setError("");
     eventRequest<{ expenses: Expense[] }>(
       token,
       "expenses.list",
-      {
-        eventId: event.id,
-      },
+      { eventId: event.id },
       { signal: controller.signal },
     )
       .then((result) => {
-        if (active) {
-          setExpenses(result.expenses);
-        }
+        if (active) setExpenses(result.expenses);
       })
-      .catch((e) => {
-        if (active && (e as RequestFailure)?.kind !== "cancelled")
+      .catch((reason) => {
+        if (active && (reason as RequestFailure)?.kind !== "cancelled")
           setError(
-            e instanceof Error ? e.message : "Ошибка загрузки расходов.",
+            reason instanceof Error
+              ? reason.message
+              : "Не удалось загрузить расходы.",
           );
       })
       .finally(() => {
@@ -137,249 +146,249 @@ export function Expenses({
       active = false;
       controller.abort();
     };
-    // Keep existing data and the form while refreshing.
+    // Keep loaded rows visible during refreshes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, event.id, revision]);
+
+  useEffect(() => {
+    if (!newExpenseId) return;
+    const timeout = window.setTimeout(() => setNewExpenseId(null), 1600);
+    return () => window.clearTimeout(timeout);
+  }, [newExpenseId]);
+
+  useEffect(() => {
+    const draft = restoredDraft.current;
+    if (!draft || draft.mode !== "edit" || form || loading) return;
+    const target = expenses.find((expense) => expense.id === draft.expenseId);
+    if (target) {
+      editingVersion.current = draft.eventVersion;
+      editingExpenseVersion.current = draft.expenseVersion;
+      setForm(target);
+    } else {
+      clearLocalState(userId, event.id, "expense-form", "draft");
+      setError("Черновик относится к удалённому расходу и был очищен.");
+    }
+    restoredDraft.current = null;
+  }, [event.id, expenses, form, loading, userId]);
+
   const persistDraft = (
-    nextForm: Expense | "new",
     nextTitle: string,
     nextAmount: string,
     nextSelected: string[],
   ) => {
-    if (pending) {
-      clearLocalState(userId, event.id, "expense-mutation", "pending");
-      setPending(null);
-    }
     saveLocalState(userId, event.id, "expense-form", "draft", {
-      mode: nextForm === "new" ? "new" : "edit",
-      expense: nextForm === "new" ? null : nextForm,
+      mode: form === "new" ? "new" : "edit",
+      expenseId: form && form !== "new" ? form.id : null,
+      expenseVersion: editingExpenseVersion.current,
       title: nextTitle,
       amount: nextAmount,
       selected: nextSelected,
       eventVersion: editingVersion.current,
-    });
+    } satisfies ExpenseDraft);
   };
-  const open = (expense: Expense | "new") => {
-    setForm(expense);
+
+  const open = (target: "new" | Expense) => {
     setError("");
     setNotice("");
-    setTitle(expense === "new" ? "" : expense.title);
-    setAmount(expense === "new" ? "" : rublesInput(expense.amount_kopecks));
-    const nextSelected =
-      expense === "new"
-        ? event.members.map((m) => m.id)
-        : expense.shares.map((s) => s.user_id);
-    setSelected(nextSelected);
+    setDeleting(null);
+    setDetail(null);
     editingVersion.current = event.version;
-    persistDraft(
-      expense,
-      expense === "new" ? "" : expense.title,
-      expense === "new" ? "" : rublesInput(expense.amount_kopecks),
-      nextSelected,
-    );
+    if (target === "new") {
+      const draft = loadLocalState(
+        userId,
+        event.id,
+        "expense-form",
+        "draft",
+        validDraft,
+      );
+      setTitle(draft?.mode === "new" ? draft.title : "");
+      setAmount(draft?.mode === "new" ? draft.amount : "");
+      setSelected(
+        draft?.mode === "new"
+          ? draft.selected.filter((id) =>
+              event.members.some((member) => member.id === id),
+            )
+          : event.members.map((member) => member.id),
+      );
+      if (draft?.mode === "new") editingVersion.current = draft.eventVersion;
+      editingExpenseVersion.current = null;
+    } else {
+      const draft = loadLocalState(
+        userId,
+        event.id,
+        "expense-form",
+        "draft",
+        validDraft,
+      );
+      if (draft?.mode === "edit" && draft.expenseId === target.id) {
+        setTitle(draft.title);
+        setAmount(draft.amount);
+        setSelected(
+          draft.selected.filter((id) =>
+            event.members.some((member) => member.id === id),
+          ),
+        );
+        editingVersion.current = draft.eventVersion;
+        editingExpenseVersion.current = draft.expenseVersion;
+      } else {
+        setTitle(target.title);
+        setAmount(rublesInput(target.amount_kopecks));
+        setSelected(target.shares.map((share) => share.user_id));
+        editingExpenseVersion.current = target.version;
+      }
+    }
+    setForm(target);
   };
+
   const submit = async (request: Pending) => {
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
     setError("");
+    setNotice("");
     setPending(request);
     saveLocalState(userId, event.id, "expense-mutation", "pending", request);
     try {
-      await eventRequest(token, request.action, request.data);
-      setPending(null);
+      const result = await eventRequest<{ expenseId?: string }>(
+        token,
+        request.action,
+        request.data,
+      );
       clearLocalState(userId, event.id, "expense-mutation", "pending");
       clearLocalState(userId, event.id, "expense-form", "draft");
+      setPending(null);
       setForm(null);
+      setDetail(null);
       setDeleting(null);
-      setNotice("Сохранено.");
-      setRevision((v) => v + 1);
+      if (request.action === "expenses.create" && result.expenseId)
+        setNewExpenseId(result.expenseId);
+      setNotice(
+        request.action === "expenses.delete"
+          ? "Расход удалён."
+          : request.action === "expenses.update"
+            ? "Расход обновлён."
+            : "Расход добавлен.",
+      );
+      setRevision((value) => value + 1);
       onChanged();
-    } catch (e) {
-      if (!shouldKeepPendingMutation(e)) {
-        setPending(null);
+    } catch (reason) {
+      if (!shouldKeepPendingMutation(reason)) {
         clearLocalState(userId, event.id, "expense-mutation", "pending");
+        setPending(null);
       }
-      if (
-        e instanceof RequestFailure &&
-        (e.kind === "forbidden" ||
-          e.kind === "not_found" ||
-          e.code === "event_locked")
-      ) {
-        clearLocalState(userId, event.id, "expense-form", "draft");
-        setForm(null);
-      }
-      setError(e instanceof Error ? e.message : "Не удалось сохранить.");
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Не удалось сохранить расход.",
+      );
     } finally {
       inFlight.current = false;
       setBusy(false);
     }
   };
-  const locked = event.status !== "draft";
-  const disabled = busy || pending !== null;
-  const visible = onlyMine ? expenses.filter((expense) => expense.author_id === userId) : expenses;
-  const groups = visible.reduce<Record<string, Expense[]>>((result, expense) => {
-    const day = expense.created_at ? new Date(expense.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) : "Без даты";
-    (result[day] ??= []).push(expense);
-    return result;
-  }, {});
-  const mineTotal = visible.reduce((sum, expense) => sum + expense.amount_kopecks, 0);
+
+  const saveForm = () => {
+    if (!form) return;
+    const kopecks = parseRubles(amount);
+    if (kopecks === null || !selected.length || !title.trim()) {
+      setError(
+        "Укажите название, корректную сумму и хотя бы одного участника.",
+      );
+      return;
+    }
+    void submit({
+      action: form === "new" ? "expenses.create" : "expenses.update",
+      data: {
+        eventId: event.id,
+        requestId: crypto.randomUUID(),
+        title,
+        amountKopecks: kopecks,
+        memberIds: [...selected].sort(),
+        ...(form === "new"
+          ? {}
+          : { expenseId: form.id, version: editingExpenseVersion.current }),
+      },
+    });
+  };
+
+  const visible = onlyMine
+    ? expenses.filter((expense) => expense.author_id === userId)
+    : expenses;
+  const groups = visible.reduce<Record<string, Expense[]>>(
+    (result, expense) => {
+      const day = expense.created_at
+        ? new Date(expense.created_at).toLocaleDateString("ru-RU", {
+            day: "numeric",
+            month: "long",
+            year: "numeric",
+          })
+        : "Без даты";
+      (result[day] ??= []).push(expense);
+      return result;
+    },
+    {},
+  );
+  const payer =
+    form && form !== "new"
+      ? form.author_name
+      : event.members.find((member) => member.id === userId)?.displayName;
+
   return (
     <section className="expenses-panel">
-      <div className="section-tools">
-        <button
-          className="small-button"
-          disabled={busy || loading}
-          onClick={() => {
-            setError("");
-            setRevision((v) => v + 1);
-          }}
+      <div className="list-toolbar">
+        <div
+          className="compact-segmented"
+          role="group"
+          aria-label="Фильтр расходов"
         >
-          {refreshing ? "Обновляем…" : "Обновить"}
+          <button
+            className={!onlyMine ? "active" : ""}
+            onClick={() => onOnlyMine(false)}
+          >
+            Все
+          </button>
+          <button
+            className={onlyMine ? "active" : ""}
+            onClick={() => onOnlyMine(true)}
+          >
+            Оплатил я
+          </button>
+        </div>
+        <button
+          className="icon-refresh"
+          disabled={busy || loading}
+          onClick={() => setRevision((value) => value + 1)}
+          aria-label="Обновить расходы"
+        >
+          {refreshing ? "…" : "↻"}
         </button>
       </div>
-      {error && (
+      {error && !form && (
         <div className="error-box" role="alert">
           <p>{error}</p>
           <button
             className="secondary"
-            disabled={busy || refreshing}
             onClick={() => setRevision((value) => value + 1)}
           >
-            Повторить загрузку
+            Повторить
           </button>
         </div>
       )}
-      {notice && <p role="status">{notice}</p>}
-      {pending && (
+      {notice && (
+        <p className="notice" role="status">
+          {notice}
+        </p>
+      )}
+      {pending && !busy && (
         <div className="confirmation">
           <p>
-            Запрос сохранён. Повторите отправку, чтобы узнать результат. Форма
-            сохранена.
-          </p>
-          <button disabled={busy} onClick={() => void submit(pending)}>
-            Повторить отправку
-          </button>
-          <button
-            className="secondary"
-            disabled={busy}
-            onClick={() => {
-              clearLocalState(userId, event.id, "expense-mutation", "pending");
-              setPending(null);
-            }}
-          >
-            Не повторять
-          </button>
-        </div>
-      )}
-      {loading && <p role="status">Загружаем расходы…</p>}
-      <label className="filter-row"><span>Только оплаченные мной</span><input type="checkbox" role="switch" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} /></label>
-      {onlyMine && <p className="filter-result">{visible.length} {visible.length === 1 ? "расход" : "расхода"} · Вы оплатили {formatDisplayMoney(mineTotal)}</p>}
-      {form && (
-        <form
-          className="event-form sheet"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const kopecks = parseRubles(amount);
-            if (kopecks === null || !selected.length) {
-              setError(
-                "Укажите сумму с точностью до копейки и хотя бы одного участника.",
-              );
-              return;
-            }
-            void submit({
-              action: form === "new" ? "expenses.create" : "expenses.update",
-              data: {
-                eventId: event.id,
-                requestId: crypto.randomUUID(),
-                title,
-                amountKopecks: kopecks,
-                memberIds: [...selected].sort(),
-                ...(form === "new"
-                  ? {}
-                  : { expenseId: form.id, version: form.version }),
-              },
-            });
-          }}
-        >
-          <h3>{form === "new" ? "Новый расход" : "Редактирование расхода"}</h3>
-          {event.version !== editingVersion.current && (
-            <p className="warning-box" role="alert">
-              Данные мероприятия изменились во время редактирования. Обновите
-              расходы перед сохранением; старая версия не будет отправлена
-              молча.
-            </p>
-          )}
-          <p>
-            Плательщик:{" "}
-            {form === "new"
-              ? event.members.find((m) => m.id === userId)?.displayName
-              : form.author_name}
-          </p>
-          <label>
-            Название
-            <input
-              required
-              maxLength={120}
-              value={title}
-              disabled={disabled}
-              onChange={(e) => {
-                setTitle(e.target.value);
-                persistDraft(form, e.target.value, amount, selected);
-              }}
-            />
-          </label>
-          <label>
-            Сумма, ₽
-            <input
-              required
-              inputMode="decimal"
-              placeholder="0,00"
-              value={amount}
-              disabled={disabled}
-              onChange={(e) => {
-                setAmount(e.target.value);
-                persistDraft(form, title, e.target.value, selected);
-              }}
-            />
-          </label>
-          <fieldset disabled={disabled}>
-            <legend>Разделить поровну между</legend>
-            {event.members.map((m) => (
-              <label className="share-choice" key={m.id}>
-                <input
-                  type="checkbox"
-                  checked={selected.includes(m.id)}
-                  onChange={(e) => {
-                    const next = e.target.checked
-                      ? [...selected, m.id]
-                      : selected.filter((id) => id !== m.id);
-                    setSelected(next);
-                    persistDraft(form, title, amount, next);
-                  }}
-                />
-                {m.displayName}
-                {m.id === userId ? " (вы)" : ""}
-              </label>
-            ))}
-          </fieldset>
-          <p className="muted">
-            Можно исключить себя. Остаток копеек распределяется по порядку ID
-            участников.
+            Ответ сервера неизвестен. Повтор с сохранённым requestId безопасен.
           </p>
           <div className="actions">
+            <button onClick={() => void submit(pending)}>Повторить</button>
             <button
-              disabled={disabled || locked || !selected.length || !title.trim()}
-              type="submit"
-            >
-              Сохранить
-            </button>
-            <button
-              type="button"
               className="secondary"
-              disabled={disabled}
               onClick={() => {
-                clearLocalState(userId, event.id, "expense-form", "draft");
                 clearLocalState(
                   userId,
                   event.id,
@@ -387,56 +396,274 @@ export function Expenses({
                   "pending",
                 );
                 setPending(null);
-                setForm(null);
               }}
             >
-              Отмена
+              Не повторять
             </button>
           </div>
-        </form>
+        </div>
       )}
+      {loading && !expenses.length && <p role="status">Загружаем расходы…</p>}
       {!loading && !visible.length && !error && (
         <div className="empty-state compact-empty">
-          <h3>{onlyMine ? "Вы пока ничего не оплатили" : "Расходов пока нет"}</h3>
-          <p>{onlyMine ? "Отключите фильтр, чтобы увидеть все расходы." : "Добавьте первую покупку, чтобы начать общий расчёт."}</p>
+          <h3>
+            {onlyMine ? "Вы пока ничего не оплатили" : "Расходов пока нет"}
+          </h3>
+          <p>
+            {onlyMine
+              ? "Переключитесь на все расходы мероприятия."
+              : "Добавьте первую покупку, чтобы начать общий расчёт."}
+          </p>
         </div>
       )}
       <div className="expense-list">
-        {Object.entries(groups).map(([day, items]) => <section className="expense-day" key={day}><h3>{day}</h3><div className="day-card">{items?.map((expense) => <button className="expense-row" key={expense.id} onClick={() => setDetail(expense)}><span><strong>{expense.title}</strong><small>Оплатили {expense.author_id === userId ? "вы" : expense.author_name} · {expense.shares.length === event.members.length ? "На всех" : `На ${expense.shares.length} участников`}</small></span><b>{formatDisplayMoney(expense.amount_kopecks)}</b><span aria-hidden="true">›</span></button>)}</div></section>)}
+        {Object.entries(groups).map(([day, items]) => (
+          <section className="expense-day" key={day}>
+            <h3>{day}</h3>
+            <m.div className="day-card" layout>
+              <AnimatePresence initial={false}>
+                {items.map((expense) => (
+                  <m.button
+                    className={`expense-row ${newExpenseId === expense.id ? "expense-row--new" : ""}`}
+                    key={expense.id}
+                    layout
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, height: 0 }}
+                    whileTap={{ scale: 0.985 }}
+                    onClick={() => setDetail(expense)}
+                  >
+                    <span>
+                      <strong>{expense.title}</strong>
+                      <small>
+                        {expense.author_id === userId
+                          ? "Оплатили вы"
+                          : `Оплатил(а) ${expense.author_name}`}{" "}
+                        ·{" "}
+                        {expense.shares.length === event.members.length
+                          ? "на всех"
+                          : `на ${expense.shares.length}`}
+                      </small>
+                    </span>
+                    <b>{formatDisplayMoney(expense.amount_kopecks)}</b>
+                    <span aria-hidden="true">›</span>
+                  </m.button>
+                ))}
+              </AnimatePresence>
+            </m.div>
+          </section>
+        ))}
       </div>
-      {detail && <div className="sheet-backdrop" onClick={() => setDetail(null)}><section className="sheet detail-sheet" role="dialog" aria-modal="true" aria-label="Подробности расхода" onClick={(e) => e.stopPropagation()}><button className="sheet-close secondary" onClick={() => setDetail(null)} aria-label="Закрыть">×</button><h2>{detail.title}</h2><p className="muted">{detail.created_at ? new Date(detail.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" }) : "Дата не указана"}</p><strong className="detail-amount">{formatMoney(detail.amount_kopecks)}</strong><p>Оплатил(а): {detail.author_name}</p><h3>Разделено поровну</h3><ul className="detail-shares">{detail.shares.map((share) => <li key={share.user_id}><span>{share.display_name}</span><strong>{formatMoney(share.amount_kopecks)}</strong></li>)}</ul>{!locked && (detail.author_id === userId || event.creatorId === userId) && <div className="actions"><button onClick={() => { open(detail); setDetail(null); }}>Изменить</button><button className="secondary danger" onClick={() => { setDeleting(detail); setDetail(null); }}>Удалить</button></div>}</section></div>}
-      {!locked && <div className="bottom-bar"><button className="primary-action" disabled={disabled || form !== null || deleting !== null} onClick={() => open("new")}><span aria-hidden="true">＋</span> Добавить расход</button></div>}
-      {deleting && (
-        <div className="confirmation" role="alert">
-          <h3>Удалить «{deleting.title}»?</h3>
-          <p>Запись об удалении останется в истории.</p>
-          <div className="actions">
-            <button
-              disabled={disabled || locked}
-              onClick={() =>
-                void submit({
-                  action: "expenses.delete",
-                  data: {
-                    eventId: event.id,
-                    expenseId: deleting.id,
-                    version: deleting.version,
-                    requestId: crypto.randomUUID(),
-                  },
-                })
-              }
-            >
-              Подтвердить удаление
-            </button>
-            <button
-              className="secondary"
-              disabled={disabled}
-              onClick={() => setDeleting(null)}
-            >
-              Отмена
-            </button>
-          </div>
+
+      {!locked && (
+        <div className="floating-action">
+          <m.button
+            className="primary-action"
+            disabled={busy || form !== null}
+            onClick={() => open("new")}
+            whileTap={{ scale: 0.98 }}
+          >
+            <span aria-hidden="true">＋</span> Добавить расход
+          </m.button>
         </div>
       )}
+
+      <AnimatePresence>
+        {form && (
+          <m.section className="subscreen" {...pageTransition}>
+            <ScreenHeader
+              title={form === "new" ? "Новый расход" : "Редактирование"}
+              back={() => setForm(null)}
+            />
+            <form
+              className="screen-content expense-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveForm();
+              }}
+            >
+              <label className="amount-label">
+                Сумма, ₽
+                <input
+                  className="amount-input"
+                  required
+                  inputMode="decimal"
+                  placeholder="0,00"
+                  value={amount}
+                  disabled={busy}
+                  onChange={(event) => {
+                    setAmount(event.target.value);
+                    persistDraft(title, event.target.value, selected);
+                  }}
+                />
+              </label>
+              <label>
+                Название
+                <input
+                  required
+                  maxLength={120}
+                  value={title}
+                  disabled={busy}
+                  onChange={(event) => {
+                    setTitle(event.target.value);
+                    persistDraft(event.target.value, amount, selected);
+                  }}
+                  placeholder="Ужин"
+                />
+              </label>
+              <div className="payer-row">
+                <span>Плательщик</span>
+                <strong>
+                  {payer}
+                  {form === "new" ? " (вы)" : ""}
+                </strong>
+              </div>
+              {event.version !== editingVersion.current && (
+                <p className="warning-box" role="alert">
+                  Мероприятие изменилось во время редактирования. Обновите
+                  данные перед сохранением.
+                </p>
+              )}
+              <fieldset disabled={busy} className="member-picker">
+                <legend>Разделить поровну между</legend>
+                {event.members.map((member) => (
+                  <label className="share-choice" key={member.id}>
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(member.id)}
+                      onChange={(change) => {
+                        const next = change.target.checked
+                          ? [...selected, member.id]
+                          : selected.filter((id) => id !== member.id);
+                        setSelected(next);
+                        persistDraft(title, amount, next);
+                      }}
+                    />
+                    <span>
+                      {member.displayName}
+                      {member.id === userId ? " (вы)" : ""}
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+              <m.button
+                className="form-submit"
+                type="submit"
+                disabled={
+                  busy ||
+                  locked ||
+                  !selected.length ||
+                  !title.trim() ||
+                  parseRubles(amount) === null
+                }
+                whileTap={{ scale: 0.98 }}
+              >
+                {busy
+                  ? "Сохраняем…"
+                  : form === "new"
+                    ? "Добавить расход"
+                    : "Сохранить изменения"}
+              </m.button>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  clearLocalState(userId, event.id, "expense-form", "draft");
+                  setTitle("");
+                  setAmount("");
+                  setSelected(event.members.map((member) => member.id));
+                }}
+              >
+                Очистить черновик
+              </button>
+              {error && (
+                <div className="error-box" role="alert">
+                  <p>{error}</p>
+                </div>
+              )}
+            </form>
+          </m.section>
+        )}
+      </AnimatePresence>
+
+      <BottomSheet
+        open={detail !== null}
+        onClose={() => {
+          setDetail(null);
+          setDeleting(null);
+        }}
+        title="Подробности расхода"
+        className="expense-detail-sheet"
+      >
+        {detail && !deleting && (
+          <>
+            <h2>{detail.title}</h2>
+            <p className="muted">
+              {new Date(detail.created_at).toLocaleDateString("ru-RU", {
+                day: "numeric",
+                month: "long",
+                year: "numeric",
+              })}
+            </p>
+            <strong className="detail-amount">
+              {formatMoney(detail.amount_kopecks)}
+            </strong>
+            <p>Оплатил(а): {detail.author_name}</p>
+            <h3>Разделено поровну</h3>
+            <ul className="detail-shares">
+              {detail.shares.map((share) => (
+                <li key={share.user_id}>
+                  <span>{share.display_name}</span>
+                  <strong>{formatMoney(share.amount_kopecks)}</strong>
+                </li>
+              ))}
+            </ul>
+            {!locked &&
+              (detail.author_id === userId || event.creatorId === userId) && (
+                <div className="actions">
+                  <button onClick={() => open(detail)}>Изменить</button>
+                  <button
+                    className="secondary danger"
+                    onClick={() => setDeleting(detail)}
+                  >
+                    Удалить
+                  </button>
+                </div>
+              )}
+          </>
+        )}
+        {deleting && (
+          <div className="confirmation" role="alert">
+            <h3>Удалить «{deleting.title}»?</h3>
+            <p>Запись об удалении останется в истории.</p>
+            <div className="actions">
+              <button
+                disabled={busy || locked}
+                onClick={() =>
+                  void submit({
+                    action: "expenses.delete",
+                    data: {
+                      eventId: event.id,
+                      expenseId: deleting.id,
+                      version: deleting.version,
+                      requestId: crypto.randomUUID(),
+                    },
+                  })
+                }
+              >
+                Удалить
+              </button>
+              <button
+                className="secondary"
+                disabled={busy}
+                onClick={() => setDeleting(null)}
+              >
+                Отмена
+              </button>
+            </div>
+          </div>
+        )}
+      </BottomSheet>
     </section>
   );
 }

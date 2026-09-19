@@ -4,15 +4,32 @@ import { requestJson, sessionExpiredEvent } from "./resilience";
 
 declare global {
   interface Window {
-    Telegram?: { WebApp: {
-      initData: string; ready(): void; expand(): void; requestFullscreen?(): void;
-      isVersionAtLeast?(version: string): boolean;
-      setHeaderColor?(color: string): void; setBackgroundColor?(color: string): void;
-      safeAreaInset?: { top: number; bottom: number; left: number; right: number };
-      contentSafeAreaInset?: { top: number; bottom: number; left: number; right: number };
-      onEvent?(name: string, handler: () => void): void;
-      offEvent?(name: string, handler: () => void): void;
-    } };
+    Telegram?: {
+      WebApp: {
+        initData: string;
+        ready(): void;
+        expand(): void;
+        requestFullscreen?(): void;
+        isVersionAtLeast?(version: string): boolean;
+        setHeaderColor?(color: string): void;
+        setBackgroundColor?(color: string): void;
+        openTelegramLink?(url: string): void;
+        safeAreaInset?: {
+          top: number;
+          bottom: number;
+          left: number;
+          right: number;
+        };
+        contentSafeAreaInset?: {
+          top: number;
+          bottom: number;
+          left: number;
+          right: number;
+        };
+        onEvent?(name: string, handler: () => void): void;
+        offEvent?(name: string, handler: () => void): void;
+      };
+    };
   }
 }
 type Session = {
@@ -87,8 +104,14 @@ export function useAuth() {
       const safe = app?.safeAreaInset;
       const content = app?.contentSafeAreaInset;
       const root = document.documentElement;
-      root.style.setProperty("--tg-safe-top", `${Math.max(safe?.top ?? 0, content?.top ?? 0)}px`);
-      root.style.setProperty("--tg-safe-bottom", `${(safe?.bottom ?? 0) + (content?.bottom ?? 0)}px`);
+      root.style.setProperty(
+        "--tg-safe-top",
+        `${Math.max(safe?.top ?? 0, content?.top ?? 0)}px`,
+      );
+      root.style.setProperty(
+        "--tg-safe-bottom",
+        `${(safe?.bottom ?? 0) + (content?.bottom ?? 0)}px`,
+      );
     };
     applyInsets();
     app?.onEvent?.("safeAreaChanged", applyInsets);
@@ -97,10 +120,16 @@ export function useAuth() {
     const fullscreenFallback = () => app?.expand();
     app?.onEvent?.("fullscreenFailed", fullscreenFallback);
     if (app?.isVersionAtLeast?.("6.1") ?? true) {
-      app?.setHeaderColor?.("#F5F3EE");
-      app?.setBackgroundColor?.("#F5F3EE");
+      app?.setHeaderColor?.("#FFFFFF");
+      app?.setBackgroundColor?.("#FAFAFA");
     }
-    try { if (app?.requestFullscreen && (app.isVersionAtLeast?.("8.0") ?? true)) app.requestFullscreen(); else app?.expand(); } catch { app?.expand(); }
+    try {
+      if (app?.requestFullscreen && (app.isVersionAtLeast?.("8.0") ?? true))
+        app.requestFullscreen();
+      else app?.expand();
+    } catch {
+      app?.expand();
+    }
     const cleanup = () => {
       app?.offEvent?.("safeAreaChanged", applyInsets);
       app?.offEvent?.("contentSafeAreaChanged", applyInsets);

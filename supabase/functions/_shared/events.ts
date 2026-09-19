@@ -118,6 +118,7 @@ export function createEventsHandler(options: {
           "expenses.update",
           "expenses.delete",
           "settlements.get",
+          "settlements.preview",
           "settlements.settle",
           "settlements.cancel",
           "transfers.send",
@@ -133,6 +134,8 @@ export function createEventsHandler(options: {
         Object.assign(data, {
           title: body.title,
           description: body.description ?? "",
+          category: body.category ?? "other",
+          eventDate: body.eventDate ?? null,
           requestId: body.requestId,
         });
       if (
@@ -171,7 +174,11 @@ export function createEventsHandler(options: {
       }
       const settlementAction = action.startsWith("settlements.");
       if (settlementAction) {
-        for (const key of ["eventId", "requestId", "eventVersion"])
+        const allowedKeys =
+          action === "settlements.preview"
+            ? ["eventId"]
+            : ["eventId", "requestId", "eventVersion"];
+        for (const key of allowedKeys)
           if (body[key] !== undefined) data[key] = body[key];
       }
       const transferAction = action.startsWith("transfers.");
@@ -190,6 +197,21 @@ export function createEventsHandler(options: {
         if (body.cursor !== undefined) data.cursor = body.cursor;
       }
       let token: string | undefined;
+      if (action === "create") {
+        if (
+          typeof body.requestId !== "string" ||
+          !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(body.requestId)
+        )
+          throw new HttpError(400, "invalid_input");
+        if (!options.invitationSecret)
+          throw new Error("Missing invitation secret");
+        token = await invitationToken(
+          options.invitationSecret,
+          "create",
+          body.requestId,
+        );
+        data.invitationHash = await sha256(token);
+      }
       if (action === "join") {
         if (
           typeof body.invitation !== "string" ||
@@ -216,16 +238,18 @@ export function createEventsHandler(options: {
       const result = (await options.rpc(
         historyAction
           ? "event_history_action"
-          : expenseAction
-            ? "expense_action"
-            : transferAction
-              ? "transfer_action"
-              : settlementAction
-                ? "settlement_action"
-                : "event_action",
+          : action === "settlements.preview"
+            ? "settlement_preview_action"
+            : expenseAction
+              ? "expense_action"
+              : transferAction
+                ? "transfer_action"
+                : settlementAction
+                  ? "settlement_action"
+                  : "event_action",
         {
           p_token_hash: hash,
-          ...(historyAction
+          ...(historyAction || action === "settlements.preview"
             ? {}
             : {
                 p_action: expenseAction
@@ -242,7 +266,9 @@ export function createEventsHandler(options: {
       if (typeof result?.error === "string")
         return respond({ error: result.error }, statuses[result.error] ?? 500);
       return respond(
-        token && result?.ok ? { ...result, invitation: token } : result,
+        token && (result?.ok || result?.eventId)
+          ? { ...result, invitation: token }
+          : result,
       );
     } catch (error) {
       if (error instanceof HttpError)

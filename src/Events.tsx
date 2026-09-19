@@ -1,12 +1,21 @@
+import { useEffect, useRef, useState } from "react";
+import { AnimatePresence } from "motion/react";
+import * as m from "motion/react-m";
 import { Expenses } from "./Expenses";
 import { Settlements } from "./Settlements";
 import { EventHistory } from "./EventHistory";
-import { useEffect, useRef, useState } from "react";
 import {
   eventRequest,
   type EventDetails,
   type EventSummary,
 } from "./events-api";
+import {
+  eventCategories,
+  eventCategoryLabels,
+  inferEventCategory,
+  isEventCategory,
+  type EventCategory,
+} from "./event-categories";
 import { invitationLink, launchInvitation } from "./invitations";
 import { listenForSafeRefresh } from "./lifecycle";
 import {
@@ -16,32 +25,36 @@ import {
   saveLocalState,
 } from "./local-state";
 import { RequestFailure, shouldKeepPendingMutation } from "./resilience";
-import { Logo, MoneySummary, useFinancials } from "./visual";
+import { BottomSheet, ScreenHeader, pageTransition } from "./ui";
+import { EventCategoryIcon, MoneySummary, useFinancials } from "./visual";
+import { formatDisplayMoney } from "./money";
 
-const statusNames = {
-  draft: "Собираем компанию",
-  settled: "Расчёт зафиксирован",
-  completed: "Завершено",
-};
-function participants(count: number) {
-  return count % 10 === 1 && count % 100 !== 11 ? "участник" : [2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100) ? "участника" : "участников";
-}
-function EventCard({ item, token, userId }: { item: EventSummary; token: string; userId: string }) {
-  const summary = useFinancials(token, item.id, userId, item.version);
-  return <a className="panel event-card" href={`#/events/${item.id}`}>
-    <h2>{item.title}</h2>
-    <p className="event-date">Дата мероприятия не указана</p>
-    <MoneySummary total={summary.total} paid={summary.paid} balance={summary.balance} loading={!summary.value && !summary.error} unavailable={!summary.value && !!summary.error} />
-    {summary.error && <small className="muted">Не удалось загрузить суммы</small>}
-  </a>;
-}
+const uuid = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+
 function routeId() {
   return (
     window.location.hash.match(/^#\/events\/([a-f0-9-]{36})$/i)?.[1] ?? null
   );
 }
+
+function formatEventDate(value: string | null) {
+  if (!value) return "Дата не указана";
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${value}T00:00:00Z`));
+}
+
+function participants(count: number) {
+  if (count % 10 === 1 && count % 100 !== 11) return "участник";
+  if ([2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100))
+    return "участника";
+  return "участников";
+}
+
 type PendingEvent = { action: string; data: Record<string, unknown> };
-const uuid = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const validPending = (value: unknown): value is PendingEvent =>
   isRecord(value) &&
   ["create", "join", "rotate", "disable", "leave"].includes(
@@ -50,15 +63,186 @@ const validPending = (value: unknown): value is PendingEvent =>
   isRecord(value.data) &&
   typeof value.data.requestId === "string" &&
   uuid.test(value.data.requestId);
-type EventDraft = { title: string; description: string; requestId: string };
+
+type EventDraft = {
+  title: string;
+  description: string;
+  category: EventCategory;
+  categoryManual: boolean;
+  eventDate: string;
+  requestId: string;
+};
 const validEventDraft = (value: unknown): value is EventDraft =>
   isRecord(value) &&
   typeof value.title === "string" &&
   value.title.length <= 120 &&
   typeof value.description === "string" &&
-  value.description.length <= 2000 &&
+  value.description.length <= 300 &&
+  isEventCategory(value.category) &&
+  typeof value.categoryManual === "boolean" &&
+  typeof value.eventDate === "string" &&
+  (value.eventDate === "" || /^\d{4}-\d{2}-\d{2}$/.test(value.eventDate)) &&
   typeof value.requestId === "string" &&
   uuid.test(value.requestId);
+
+function EventCard({
+  item,
+  token,
+  userId,
+}: {
+  item: EventSummary;
+  token: string;
+  userId: string;
+}) {
+  const summary = useFinancials(token, item.id, userId, item.version);
+  const unavailable = !summary.value && !!summary.error;
+  return (
+    <m.a
+      className="event-card"
+      href={`#/events/${item.id}`}
+      layout
+      whileTap={{ scale: 0.98 }}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.24 }}
+    >
+      <div className="event-card-heading">
+        <EventCategoryIcon category={item.category ?? "other"} />
+        <h2>{item.title}</h2>
+      </div>
+      <div
+        className="event-card-metrics"
+        aria-busy={!summary.value && !summary.error}
+      >
+        <div>
+          <span>Всего потрачено</span>
+          <strong>
+            {unavailable || !summary.value
+              ? "—"
+              : formatDisplayMoney(summary.total)}
+          </strong>
+        </div>
+        <div>
+          <span>Вы потратили</span>
+          <strong>
+            {unavailable || !summary.value
+              ? "—"
+              : formatDisplayMoney(summary.paid)}
+          </strong>
+        </div>
+      </div>
+    </m.a>
+  );
+}
+
+function CreationScreen({
+  title,
+  description,
+  category,
+  eventDate,
+  busy,
+  restored,
+  onBack,
+  onClear,
+  onTitle,
+  onDescription,
+  onDate,
+  onChooseCategory,
+  onSubmit,
+}: {
+  title: string;
+  description: string;
+  category: EventCategory;
+  eventDate: string;
+  busy: boolean;
+  restored: boolean;
+  onBack: () => void;
+  onClear: () => void;
+  onTitle: (value: string) => void;
+  onDescription: (value: string) => void;
+  onDate: (value: string) => void;
+  onChooseCategory: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <m.section className="screen creation-screen" {...pageTransition}>
+      <ScreenHeader title="Новое мероприятие" back={onBack} />
+      <form
+        className="screen-content creation-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit();
+        }}
+      >
+        <div className="form-intro">
+          <h1>Что планируем?</h1>
+          <p>Название поможет подобрать иконку. Всё можно изменить позже.</p>
+        </div>
+        {restored && (
+          <div className="draft-note" role="status">
+            <span>Черновик восстановлен</span>
+            <button type="button" className="text-button" onClick={onClear}>
+              Очистить
+            </button>
+          </div>
+        )}
+        <label>
+          Название
+          <input
+            required
+            maxLength={120}
+            value={title}
+            disabled={busy}
+            onChange={(event) => onTitle(event.target.value)}
+            placeholder="Выходные у озера"
+          />
+        </label>
+        <button
+          type="button"
+          className="category-choice"
+          onClick={onChooseCategory}
+          disabled={busy}
+        >
+          <EventCategoryIcon category={category} />
+          <span>
+            <small>Категория</small>
+            <strong>{eventCategoryLabels[category]}</strong>
+          </span>
+          <span aria-hidden="true">›</span>
+        </button>
+        <label>
+          Дата <span className="muted">(необязательно)</span>
+          <input
+            type="date"
+            value={eventDate}
+            disabled={busy}
+            onChange={(event) => onDate(event.target.value)}
+          />
+        </label>
+        <label>
+          Краткое описание <span className="muted">(необязательно)</span>
+          <textarea
+            maxLength={300}
+            value={description}
+            disabled={busy}
+            onChange={(event) => onDescription(event.target.value)}
+            placeholder="Где встречаемся и что взять с собой"
+          />
+          <small className="field-counter">{description.length}/300</small>
+        </label>
+        <m.button
+          className="form-submit"
+          type="submit"
+          disabled={busy || !title.trim()}
+          whileTap={{ scale: 0.98 }}
+        >
+          {busy ? "Создаём…" : "Создать мероприятие"}
+        </m.button>
+      </form>
+    </m.section>
+  );
+}
+
 export function Events({
   token,
   userId,
@@ -84,14 +268,31 @@ export function Events({
   const restoredDraft = useRef(
     loadLocalState(userId, null, "event-create", "draft", validEventDraft),
   );
-  const [creating, setCreating] = useState(!!restoredDraft.current);
+  const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState(restoredDraft.current?.title ?? "");
   const [description, setDescription] = useState(
     restoredDraft.current?.description ?? "",
   );
+  const [category, setCategory] = useState<EventCategory>(
+    restoredDraft.current?.category ?? "other",
+  );
+  const [categoryManual, setCategoryManual] = useState(
+    restoredDraft.current?.categoryManual ?? false,
+  );
+  const [eventDate, setEventDate] = useState(
+    restoredDraft.current?.eventDate ?? "",
+  );
   const requestId = useRef(
     restoredDraft.current?.requestId ?? crypto.randomUUID(),
   );
+  const [categoryPicker, setCategoryPicker] = useState(false);
+  const [created, setCreated] = useState<{
+    id: string;
+    title: string;
+    category: EventCategory;
+    eventDate: string | null;
+    link: string;
+  } | null>(null);
   const [invitation, setInvitation] = useState(() =>
     launchInvitation(window.Telegram?.WebApp.initData ?? "", location.search),
   );
@@ -99,6 +300,9 @@ export function Events({
   const [confirm, setConfirm] = useState<"rotate" | "disable" | "leave" | null>(
     null,
   );
+  const [eventPanel, setEventPanel] = useState<
+    "menu" | "participants" | "invite" | "history" | "settings" | null
+  >(null);
   const [pendingMutation, setPendingMutation] = useState<PendingEvent | null>(
     () =>
       loadLocalState(
@@ -111,41 +315,44 @@ export function Events({
       loadLocalState(userId, null, "event-create", "pending", validPending),
   );
   const [online, setOnline] = useState(() => navigator.onLine);
-  const [tab, setTab] = useState<"expenses" | "transfers">("expenses");
+  const [tab, setTab] = useState<"expenses" | "calculation">("expenses");
+  const [onlyMine, setOnlyMine] = useState(false);
+  const scrollPositions = useRef({ expenses: 0, calculation: 0 });
   const overview = useFinancials(token, eventId ?? "", userId, revision);
   const inFlight = useRef(false);
+
   const go = (id: string | null) => {
     window.location.hash = id ? `/events/${id}` : "/events";
   };
+
   useEffect(() => {
     const onHash = () => {
-      const nextEventId = routeId();
-      setEventId(nextEventId);
+      setEventId(routeId());
       setEvent(null);
-      setLink("");
+      setEventPanel(null);
       setConfirm(null);
       setNotice("");
       setTab("expenses");
+      scrollPositions.current = { expenses: 0, calculation: 0 };
+      window.scrollTo({ top: 0 });
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
-  useEffect(() => {
-    return listenForSafeRefresh({
-      windowTarget: window,
-      documentTarget: document,
-      isOnline: () => navigator.onLine,
-      isVisible: () => document.visibilityState === "visible",
-      onOnlineChange: setOnline,
-      onRefresh: () => setRevision((value) => value + 1),
-    });
-  }, []);
-  useEffect(() => {
-    const update = () => document.documentElement.classList.toggle("keyboard-open", !!window.visualViewport && window.innerHeight - window.visualViewport.height > 130);
-    window.visualViewport?.addEventListener("resize", update);
-    update();
-    return () => { window.visualViewport?.removeEventListener("resize", update); document.documentElement.classList.remove("keyboard-open"); };
-  }, []);
+
+  useEffect(
+    () =>
+      listenForSafeRefresh({
+        windowTarget: window,
+        documentTarget: document,
+        isOnline: () => navigator.onLine,
+        isVisible: () => document.visibilityState === "visible",
+        onOnlineChange: setOnline,
+        onRefresh: () => setRevision((value) => value + 1),
+      }),
+    [],
+  );
+
   useEffect(() => {
     setPendingMutation(
       loadLocalState(
@@ -166,6 +373,7 @@ export function Events({
           : null),
     );
   }, [eventId, userId]);
+
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
@@ -192,9 +400,11 @@ export function Events({
           );
           if (active) setEvents(value.events);
         }
-      } catch (e) {
-        if (active && (e as RequestFailure)?.kind !== "cancelled")
-          setError(e instanceof Error ? e.message : "Ошибка загрузки.");
+      } catch (reason) {
+        if (active && (reason as RequestFailure)?.kind !== "cancelled")
+          setError(
+            reason instanceof Error ? reason.message : "Ошибка загрузки.",
+          );
       } finally {
         if (active) {
           setLoading(false);
@@ -211,6 +421,7 @@ export function Events({
     // Existing data intentionally stays visible during background refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, eventId, revision]);
+
   const run = async (work: () => Promise<void>) => {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -219,27 +430,46 @@ export function Events({
     setNotice("");
     try {
       await work();
-    } catch (e) {
+    } catch (reason) {
       setError(
-        e instanceof Error ? e.message : "Не удалось выполнить действие.",
+        reason instanceof Error
+          ? reason.message
+          : "Не удалось выполнить действие.",
       );
     } finally {
       inFlight.current = false;
       setBusy(false);
     }
   };
-  const persistDraft = (nextTitle: string, nextDescription: string) => {
+
+  const draftValue = (changes: Partial<EventDraft> = {}): EventDraft => ({
+    title,
+    description,
+    category,
+    categoryManual,
+    eventDate,
+    requestId: requestId.current,
+    ...changes,
+  });
+  const persistDraft = (changes: Partial<EventDraft>) => {
     if (pendingMutation?.action === "create") {
       clearLocalState(userId, null, "event-create", "pending");
       setPendingMutation(null);
       requestId.current = crypto.randomUUID();
     }
-    saveLocalState(userId, null, "event-create", "draft", {
-      title: nextTitle,
-      description: nextDescription,
-      requestId: requestId.current,
-    });
+    saveLocalState(userId, null, "event-create", "draft", draftValue(changes));
   };
+  const clearDraft = () => {
+    clearLocalState(userId, null, "event-create", "draft");
+    setTitle("");
+    setDescription("");
+    setCategory("other");
+    setCategoryManual(false);
+    setEventDate("");
+    requestId.current = crypto.randomUUID();
+    restoredDraft.current = null;
+  };
+
   const submitMutation = async (
     request: PendingEvent,
     scopeEventId: string | null,
@@ -268,380 +498,694 @@ export function Events({
       }
     });
   };
+
+  const createEvent = () => {
+    const request: PendingEvent = {
+      action: "create",
+      data: {
+        title,
+        description,
+        category,
+        eventDate: eventDate || null,
+        requestId: requestId.current,
+      },
+    };
+    void submitMutation(request, null, "event-create", (result) => {
+      const id = String(result.eventId);
+      const tokenValue =
+        typeof result.invitation === "string" ? result.invitation : "";
+      clearLocalState(userId, null, "event-create", "draft");
+      setCreated({
+        id,
+        title: title.trim(),
+        category,
+        eventDate: eventDate || null,
+        link: tokenValue ? invitationLink(tokenValue) : "",
+      });
+      clearDraft();
+      setCreating(false);
+      setRevision((value) => value + 1);
+    });
+  };
+
   const change = (action: "rotate" | "disable" | "leave") =>
     void submitMutation(
       { action, data: { eventId, requestId: crypto.randomUUID() } },
       eventId,
       "event-mutation",
       (result) => {
-        if (routeId() !== eventId) {
-          setRevision((v) => v + 1);
-          return;
-        }
         setConfirm(null);
         if (action === "leave") {
+          setEventPanel(null);
           go(null);
-          setRevision((v) => v + 1);
           return;
         }
-        setLink(
-          typeof result.invitation === "string"
-            ? invitationLink(result.invitation)
-            : "",
-        );
+        if (typeof result.invitation === "string")
+          setLink(invitationLink(result.invitation));
         setNotice(
           action === "disable"
             ? "Приглашение отключено."
-            : "Новая ссылка готова. Скопируйте её и отправьте друзьям.",
+            : "Новая ссылка готова.",
         );
-        setRevision((v) => v + 1);
+        setRevision((value) => value + 1);
       },
     );
-  return (
-    <main className="app events-app">
-      <header className="header">
-        {eventId ? <a className="header-control" href="#/events" aria-label="К мероприятиям">‹</a> : <span className="header-spacer" />}
-        <a className="brand" href="#/events" aria-label="раскидай — главная"><Logo /></a>
-        <details className="header-menu"><summary className="header-control" aria-label="Меню">···</summary><div className="header-menu-content"><span>{displayName}</span><button disabled={busy} onClick={() => void logout()}>Выйти</button></div></details>
-      </header>
-      {!online && (
-        <div className="offline-banner" role="status">
-          Нет сети. Показаны последние загруженные данные; формы сохранены.
-        </div>
-      )}
-      {invitation && (
-        <section className="panel invite-panel">
-          <h2>Вас пригласили в мероприятие</h2>
-          <p>Присоединитесь, чтобы увидеть название и участников.</p>
-          <div className="actions">
-            <button
-              disabled={busy}
-              onClick={() => {
-                const request = {
-                  action: "join",
-                  data: { invitation, requestId: crypto.randomUUID() },
-                };
-                void submitMutation(
-                  request,
-                  null,
-                  "event-mutation",
-                  (result) => {
-                    setInvitation(null);
-                    go(String(result.eventId));
-                    setRevision((v) => v + 1);
-                  },
-                );
-              }}
-            >
-              Присоединиться
-            </button>
-            <button
-              className="secondary"
-              disabled={busy}
-              onClick={() => setInvitation(null)}
-            >
-              Не сейчас
-            </button>
-          </div>
-        </section>
-      )}
-      {error && (
-        <div className="error-box" role="alert">
-          <p>{error}</p>
+
+  const chooseTab = (next: "expenses" | "calculation") => {
+    if (next === tab) return;
+    scrollPositions.current[tab] = window.scrollY;
+    setTab(next);
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() =>
+        window.scrollTo({ top: scrollPositions.current[next] }),
+      ),
+    );
+  };
+
+  const share = (url: string, eventTitle: string) => {
+    const target = `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(`Присоединяйтесь к мероприятию «${eventTitle}» в раскидай`)}`;
+    if (window.Telegram?.WebApp.openTelegramLink)
+      window.Telegram.WebApp.openTelegramLink(target);
+    else window.open(target, "_blank", "noopener,noreferrer");
+  };
+
+  const activeEvents = events.filter((item) => item.status !== "completed");
+  const completedEvents = events.filter((item) => item.status === "completed");
+
+  const renderEventPanel = () => {
+    if (!event) return null;
+    if (eventPanel === "participants")
+      return (
+        <>
+          <h2>Участники</h2>
+          <p className="muted">{event.members.length}/30</p>
+          <ul className="member-list">
+            {event.members.map((member) => (
+              <li key={member.id}>
+                <span>
+                  {member.displayName}
+                  {member.id === userId ? " (вы)" : ""}
+                  <small>
+                    {member.id === event.creatorId ? "Создатель" : "Участник"}
+                  </small>
+                </span>
+              </li>
+            ))}
+          </ul>
           <button
-            className="secondary"
-            disabled={busy || refreshing}
-            onClick={() => setRevision((value) => value + 1)}
+            className="secondary sheet-back-action"
+            onClick={() => setEventPanel("menu")}
           >
-            Повторить загрузку
+            ← К меню
           </button>
-        </div>
-      )}
-      {notice && (
-        <p className="notice" role="status">
-          {notice}
-        </p>
-      )}
-      {pendingMutation && (
-        <section className="panel confirmation" role="status">
-          <h2>Найден незавершённый запрос</h2>
-          <p>
-            Сервер мог выполнить действие. Можно безопасно повторить точное
-            сохранённое тело с тем же requestId или отказаться от повтора.
-          </p>
-          <div className="actions">
-            <button
-              disabled={busy}
-              onClick={() =>
-                void submitMutation(
-                  pendingMutation,
-                  pendingMutation.action === "create" ? null : eventId,
-                  pendingMutation.action === "create"
-                    ? "event-create"
-                    : "event-mutation",
-                  (result) => {
-                    if (pendingMutation.action === "create") {
-                      clearLocalState(userId, null, "event-create", "draft");
-                      go(String(result.eventId));
-                    } else if (pendingMutation.action === "join") {
-                      setInvitation(null);
-                      go(String(result.eventId));
-                    } else if (pendingMutation.action === "leave") {
-                      go(null);
-                    } else {
-                      if (
-                        pendingMutation.action === "rotate" &&
-                        typeof result.invitation === "string"
-                      )
-                        setLink(invitationLink(result.invitation));
-                      setRevision((value) => value + 1);
-                    }
-                  },
-                )
-              }
-            >
-              Повторить тот же запрос
-            </button>
-            <button
-              className="secondary"
-              disabled={busy}
-              onClick={() => {
-                const create = pendingMutation.action === "create";
-                clearLocalState(
-                  userId,
-                  create ? null : eventId,
-                  create ? "event-create" : "event-mutation",
-                  "pending",
-                );
-                setPendingMutation(null);
-                if (create) {
-                  requestId.current = crypto.randomUUID();
-                  saveLocalState(userId, null, "event-create", "draft", {
-                    title,
-                    description,
-                    requestId: requestId.current,
-                  });
-                }
-              }}
-            >
-              Не повторять
-            </button>
-          </div>
-        </section>
-      )}
-      {!eventId && <div className="page-heading"><h1>Мои мероприятия</h1><button className="small-button" disabled={loading || busy} onClick={() => setRevision((v) => v + 1)}>{refreshing ? "Обновляем…" : "Обновить"}</button></div>}
-      {loading && <p role="status">Загружаем…</p>}
-      {!eventId && (
-        <>
-          {creating && <button className="secondary" disabled={busy} onClick={() => setCreating(false)}>← К мероприятиям</button>}
-          {creating && (
-            <form
-              className="panel event-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                const request = {
-                  action: "create",
-                  data: { title, description, requestId: requestId.current },
-                };
-                void submitMutation(request, null, "event-create", (result) => {
-                  requestId.current = crypto.randomUUID();
-                  clearLocalState(userId, null, "event-create", "draft");
-                  setTitle("");
-                  setDescription("");
-                  setCreating(false);
-                  go(String(result.eventId));
-                });
-              }}
-            >
-              <h2>Что планируем?</h2>
-              <label>
-                Название
-                <input
-                  required
-                  maxLength={120}
-                  value={title}
-                  disabled={busy}
-                  onChange={(e) => {
-                    setTitle(e.target.value);
-                    persistDraft(e.target.value, description);
-                  }}
-                  placeholder="Выходные у озера"
-                />
-              </label>
-              <label>
-                Описание <span className="muted">(необязательно)</span>
-                <textarea
-                  maxLength={2000}
-                  value={description}
-                  disabled={busy}
-                  onChange={(e) => {
-                    setDescription(e.target.value);
-                    persistDraft(title, e.target.value);
-                  }}
-                  placeholder="Где, когда и что взять с собой"
-                />
-              </label>
-              <p className="muted">
-                До 30 участников, включая вас. Валюта — рубли.
-              </p>
-              <button disabled={busy || !title.trim()} type="submit">
-                {busy ? "Создаём…" : "Создать"}
-              </button>
-            </form>
-          )}
-          {!loading && !error && events.length === 0 && (
-            <section className="panel empty-state">
-              <h2>Всё начинается со встречи</h2>
-              <p>Создайте мероприятие и пригласите друзей по ссылке.</p>
-            </section>
-          )}
-          {!loading && (
-            <div className="event-list">
-              {events.map((item) => <EventCard key={item.id} item={item} token={token} userId={userId} />)}
-            </div>
-          )}
-          {!creating && <div className="bottom-bar"><button className="primary-action" disabled={busy} onClick={() => setCreating(true)}><span aria-hidden="true">＋</span> Новое мероприятие</button></div>}
         </>
-      )}
-      {!loading && event && (
+      );
+    if (eventPanel === "invite")
+      return (
         <>
-          <section className="event-overview">
-            <h1 className="event-title">{event.title}</h1>
-            <p className="event-meta">Дата не указана · {event.members.length} {participants(event.members.length)}</p>
-            {event.description && <p className="description">{event.description}</p>}
-            <MoneySummary total={overview.total} paid={overview.paid} balance={overview.balance} loading={!overview.value && !overview.error} unavailable={!overview.value && !!overview.error} />
-            {overview.error && <p className="muted">Суммы недоступны: {overview.error}</p>}
-          </section>
-          <div className="tabs" role="tablist" aria-label="Разделы мероприятия">
-            <button role="tab" aria-selected={tab === "expenses"} className={tab === "expenses" ? "active" : ""} onClick={() => setTab("expenses")}>Расходы</button>
-            <button role="tab" aria-selected={tab === "transfers"} className={tab === "transfers" ? "active" : ""} onClick={() => setTab("transfers")}>Переводы</button>
-          </div>
-          {tab === "expenses" ? <Expenses key={event.id} token={token} userId={userId} event={event} onChanged={() => setRevision((value) => value + 1)} /> : <Settlements token={token} userId={userId} event={event} onChanged={() => setRevision((value) => value + 1)} />}
-          <details className="event-management">
-            <summary>Участники и настройки · {statusNames[event.status]}</summary>
-          <section className="panel">
-            <h2>
-              Участники <span className="muted">{event.members.length}/30</span>
-            </h2>
-            <ul className="member-list">
-              {event.members.map((member) => (
-                <li key={member.id}>
-                  <span className="avatar" aria-hidden="true">
-                    {member.displayName.slice(0, 1)}
-                  </span>
-                  <span>
-                    {member.displayName}
-                    {member.id === userId ? " (вы)" : ""}
-                    <small>
-                      {member.id === event.creatorId ? "Создатель" : "Участник"}
-                    </small>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </section>
+          <h2>Приглашение</h2>
           {event.creatorId === userId ? (
-            <section className="panel">
-              <h2>Пригласить друзей</h2>
+            <>
               <p>
                 {event.invitationActive
-                  ? "Ссылка активна."
+                  ? "Ссылка активна. Создайте новую, чтобы поделиться ей."
                   : "Активной ссылки пока нет."}
               </p>
               {link && (
-                <label>
-                  Ссылка-приглашение
+                <>
                   <input
                     readOnly
                     value={link}
                     onFocus={(e) => e.currentTarget.select()}
                   />
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() =>
-                      void run(async () => {
-                        await navigator.clipboard.writeText(link);
-                        setNotice("Ссылка скопирована.");
-                      })
-                    }
-                  >
-                    Скопировать ссылку
-                  </button>
-                </label>
+                  <div className="actions">
+                    <button onClick={() => share(link, event.title)}>
+                      Поделиться
+                    </button>
+                    <button
+                      className="secondary"
+                      onClick={() =>
+                        void navigator.clipboard
+                          .writeText(link)
+                          .then(() => setNotice("Ссылка скопирована."))
+                      }
+                    >
+                      Скопировать
+                    </button>
+                  </div>
+                </>
               )}
-              <p className="muted">
-                Новая ссылка заменит предыдущую. Скопируйте её сейчас: после
-                закрытия экрана потребуется создать новую.
-              </p>
-              <div className="actions">
+              <button
+                disabled={busy || event.status !== "draft"}
+                onClick={() =>
+                  event.invitationActive
+                    ? setConfirm("rotate")
+                    : change("rotate")
+                }
+              >
+                {event.invitationActive
+                  ? "Создать новую ссылку"
+                  : "Создать ссылку"}
+              </button>
+              {event.invitationActive && (
                 <button
+                  className="secondary danger standalone-action"
                   disabled={busy || event.status !== "draft"}
-                  onClick={() =>
-                    event.invitationActive
-                      ? setConfirm("rotate")
-                      : change("rotate")
-                  }
+                  onClick={() => setConfirm("disable")}
                 >
-                  {event.invitationActive
-                    ? "Обновить ссылку"
-                    : "Создать ссылку"}
+                  Отключить приглашение
                 </button>
-                {event.invitationActive && (
-                  <button
-                    className="secondary"
-                    disabled={busy || event.status !== "draft"}
-                    onClick={() => setConfirm("disable")}
-                  >
-                    Отключить ссылку
-                  </button>
-                )}
-              </div>
-            </section>
+              )}
+            </>
           ) : (
+            <p>Новой ссылкой может поделиться создатель мероприятия.</p>
+          )}
+          <button
+            className="secondary sheet-back-action"
+            onClick={() => setEventPanel("menu")}
+          >
+            ← К меню
+          </button>
+        </>
+      );
+    if (eventPanel === "history")
+      return (
+        <>
+          <EventHistory
+            token={token}
+            eventId={event.id}
+            revision={event.version}
+          />
+          <button
+            className="secondary sheet-back-action"
+            onClick={() => setEventPanel("menu")}
+          >
+            ← К меню
+          </button>
+        </>
+      );
+    if (eventPanel === "settings")
+      return (
+        <>
+          <h2>Настройки</h2>
+          <p>
+            <strong>{displayName}</strong>
+          </p>
+          <p className="muted">
+            Статус:{" "}
+            {event.status === "draft"
+              ? "собираем расходы"
+              : event.status === "settled"
+                ? "идут переводы"
+                : "завершено"}
+          </p>
+          {event.creatorId !== userId && (
             <button
-              className="danger secondary"
+              className="secondary danger standalone-action"
               disabled={busy || event.status !== "draft"}
               onClick={() => setConfirm("leave")}
             >
               Выйти из мероприятия
             </button>
           )}
-          {confirm && (
-            <section className="panel confirmation" role="alert">
-              <h2>
-                {confirm === "leave"
-                  ? "Выйти из мероприятия?"
-                  : confirm === "rotate"
-                    ? "Заменить ссылку?"
-                    : "Отключить приглашение?"}
-              </h2>
-              <p>
-                {confirm === "leave"
-                  ? "Мероприятие исчезнет из вашего списка. Для возвращения понадобится действующая ссылка."
-                  : "Старая ссылка перестанет принимать новых участников. Те, кто уже присоединился, останутся."}
-              </p>
-              <div className="actions">
-                <button disabled={busy} onClick={() => change(confirm)}>
-                  Подтвердить
-                </button>
-                <button
-                  className="secondary"
-                  disabled={busy}
-                  onClick={() => setConfirm(null)}
+          <button
+            className="secondary standalone-action"
+            disabled={busy}
+            onClick={() => void logout()}
+          >
+            Выйти из аккаунта
+          </button>
+          <button
+            className="secondary sheet-back-action"
+            onClick={() => setEventPanel("menu")}
+          >
+            ← К меню
+          </button>
+        </>
+      );
+    return (
+      <>
+        <h2>Меню мероприятия</h2>
+        <nav className="event-menu-list">
+          <button onClick={() => setEventPanel("participants")}>
+            Участники <span>{event.members.length} ›</span>
+          </button>
+          <button onClick={() => setEventPanel("invite")}>
+            Приглашение <span>›</span>
+          </button>
+          <button onClick={() => setEventPanel("history")}>
+            История <span>›</span>
+          </button>
+          <button onClick={() => setEventPanel("settings")}>
+            Настройки <span>›</span>
+          </button>
+        </nav>
+      </>
+    );
+  };
+
+  return (
+    <main className="app events-app">
+      {!online && (
+        <div className="offline-banner" role="status">
+          Нет сети. Формы и незавершённые действия сохранены.
+        </div>
+      )}
+      {error && (
+        <div className="global-message error-box" role="alert">
+          <p>{error}</p>
+          <button
+            className="secondary"
+            onClick={() => setRevision((value) => value + 1)}
+          >
+            Повторить
+          </button>
+        </div>
+      )}
+      {notice && (
+        <p className="global-message notice" role="status">
+          {notice}
+        </p>
+      )}
+
+      <AnimatePresence mode="wait">
+        {created ? (
+          <m.section
+            className="screen success-screen"
+            key="created"
+            {...pageTransition}
+          >
+            <ScreenHeader
+              title="Готово"
+              back={() => {
+                setCreated(null);
+                go(created.id);
+              }}
+            />
+            <div className="screen-content success-content">
+              <m.div
+                className="success-mark"
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+              >
+                ✓
+              </m.div>
+              <EventCategoryIcon category={created.category} />
+              <h1>Мероприятие создано</h1>
+              <h2>{created.title}</h2>
+              {created.eventDate && <p>{formatEventDate(created.eventDate)}</p>}
+              {created.link ? (
+                <>
+                  <m.button
+                    className="primary-action"
+                    whileTap={{ scale: 0.98 }}
+                    onClick={() => share(created.link, created.title)}
+                  >
+                    Поделиться в Telegram
+                  </m.button>
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      void navigator.clipboard
+                        .writeText(created.link)
+                        .then(() => setNotice("Ссылка скопирована."))
+                    }
+                  >
+                    Скопировать ссылку
+                  </button>
+                </>
+              ) : (
+                <p className="warning-box">
+                  Мероприятие создано. Ссылку можно создать в его меню.
+                </p>
+              )}
+              <button
+                className="text-button"
+                onClick={() => {
+                  setCreated(null);
+                  go(created.id);
+                }}
+              >
+                Перейти к мероприятию
+              </button>
+            </div>
+          </m.section>
+        ) : creating ? (
+          <CreationScreen
+            key="creating"
+            title={title}
+            description={description}
+            category={category}
+            eventDate={eventDate}
+            busy={busy}
+            restored={!!restoredDraft.current}
+            onBack={() => setCreating(false)}
+            onClear={clearDraft}
+            onTitle={(value) => {
+              const inferred = categoryManual
+                ? category
+                : inferEventCategory(value);
+              setTitle(value);
+              if (!categoryManual) setCategory(inferred);
+              persistDraft({
+                title: value,
+                ...(categoryManual ? {} : { category: inferred }),
+              });
+            }}
+            onDescription={(value) => {
+              setDescription(value);
+              persistDraft({ description: value });
+            }}
+            onDate={(value) => {
+              setEventDate(value);
+              persistDraft({ eventDate: value });
+            }}
+            onChooseCategory={() => setCategoryPicker(true)}
+            onSubmit={createEvent}
+          />
+        ) : eventId && event ? (
+          <m.section
+            className="event-screen"
+            key={event.id}
+            {...pageTransition}
+          >
+            <ScreenHeader
+              title={event.title}
+              back={() => go(null)}
+              action={
+                <m.button
+                  type="button"
+                  className="header-control menu-control"
+                  whileTap={{ scale: 0.94 }}
+                  onClick={() => setEventPanel("menu")}
+                  aria-label="Меню мероприятия"
                 >
-                  Отмена
+                  •••
+                </m.button>
+              }
+            />
+            <section className="event-overview">
+              <div className="event-identity">
+                <EventCategoryIcon category={event.category ?? "other"} />
+                <div>
+                  <span>{eventCategoryLabels[event.category ?? "other"]}</span>
+                  <strong>{formatEventDate(event.eventDate)}</strong>
+                </div>
+              </div>
+              {event.description && (
+                <p className="description">{event.description}</p>
+              )}
+              <MoneySummary
+                total={overview.total}
+                paid={overview.paid}
+                balance={overview.balance}
+                loading={!overview.value && !overview.error}
+                unavailable={!overview.value && !!overview.error}
+              />
+              <p className="event-members">
+                {event.members.length} {participants(event.members.length)}
+              </p>
+            </section>
+            <div
+              className="tabs sticky-tabs"
+              role="tablist"
+              aria-label="Разделы мероприятия"
+            >
+              <button
+                role="tab"
+                aria-selected={tab === "expenses"}
+                className={tab === "expenses" ? "active" : ""}
+                onClick={() => chooseTab("expenses")}
+              >
+                Расходы
+              </button>
+              <button
+                role="tab"
+                aria-selected={tab === "calculation"}
+                className={tab === "calculation" ? "active" : ""}
+                onClick={() => chooseTab("calculation")}
+              >
+                Расчёт
+              </button>
+            </div>
+            <AnimatePresence mode="wait" initial={false}>
+              {tab === "expenses" ? (
+                <m.div
+                  key="expenses"
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -10 }}
+                  transition={{ duration: 0.22 }}
+                >
+                  <Expenses
+                    token={token}
+                    userId={userId}
+                    event={event}
+                    onlyMine={onlyMine}
+                    onOnlyMine={setOnlyMine}
+                    onChanged={() => setRevision((value) => value + 1)}
+                  />
+                </m.div>
+              ) : (
+                <m.div
+                  key="calculation"
+                  initial={{ opacity: 0, x: 10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 10 }}
+                  transition={{ duration: 0.22 }}
+                >
+                  <Settlements
+                    token={token}
+                    userId={userId}
+                    event={event}
+                    onChanged={() => setRevision((value) => value + 1)}
+                  />
+                </m.div>
+              )}
+            </AnimatePresence>
+          </m.section>
+        ) : !eventId ? (
+          <m.section className="home-screen" key="home" {...pageTransition}>
+            <ScreenHeader logo />
+            <div className="home-content">
+              <div className="page-heading">
+                <h1>Мои мероприятия</h1>
+                <button
+                  className="small-button"
+                  disabled={loading || busy}
+                  onClick={() => setRevision((value) => value + 1)}
+                >
+                  {refreshing ? "Обновляем…" : "Обновить"}
                 </button>
               </div>
-            </section>
-          )}
-          </details>
-          <EventHistory
-            token={token}
-            eventId={event.id}
-            revision={event.version}
-          />
-        </>
+              {invitation && (
+                <section className="invite-card">
+                  <h2>Вас пригласили</h2>
+                  <p>Присоединитесь, чтобы увидеть мероприятие и участников.</p>
+                  <div className="actions">
+                    <button
+                      disabled={busy}
+                      onClick={() =>
+                        void submitMutation(
+                          {
+                            action: "join",
+                            data: {
+                              invitation,
+                              requestId: crypto.randomUUID(),
+                            },
+                          },
+                          null,
+                          "event-mutation",
+                          (result) => {
+                            setInvitation(null);
+                            go(String(result.eventId));
+                          },
+                        )
+                      }
+                    >
+                      Присоединиться
+                    </button>
+                    <button
+                      className="secondary"
+                      onClick={() => setInvitation(null)}
+                    >
+                      Не сейчас
+                    </button>
+                  </div>
+                </section>
+              )}
+              {loading && !events.length && (
+                <p role="status">Загружаем мероприятия…</p>
+              )}
+              {!loading && !error && events.length === 0 && (
+                <section className="empty-state home-empty">
+                  <EventCategoryIcon category="other" />
+                  <h2>Пока нет мероприятий</h2>
+                  <p>Создайте первую встречу и пригласите друзей.</p>
+                </section>
+              )}
+              <div className="event-list">
+                {activeEvents.map((item) => (
+                  <EventCard
+                    key={item.id}
+                    item={item}
+                    token={token}
+                    userId={userId}
+                  />
+                ))}
+              </div>
+              {completedEvents.length > 0 && (
+                <details className="completed-events">
+                  <summary>
+                    Завершённые <span>{completedEvents.length}⌄</span>
+                  </summary>
+                  <div className="event-list">
+                    {completedEvents.map((item) => (
+                      <EventCard
+                        key={item.id}
+                        item={item}
+                        token={token}
+                        userId={userId}
+                      />
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+            <div className="floating-action">
+              <m.button
+                className="primary-action"
+                disabled={busy}
+                onClick={() => {
+                  restoredDraft.current = loadLocalState(
+                    userId,
+                    null,
+                    "event-create",
+                    "draft",
+                    validEventDraft,
+                  );
+                  setCreating(true);
+                }}
+                whileTap={{ scale: 0.98 }}
+              >
+                <span aria-hidden="true">＋</span> Добавить мероприятие
+              </m.button>
+            </div>
+          </m.section>
+        ) : (
+          <m.section
+            className="screen loading-screen"
+            key="loading"
+            {...pageTransition}
+          >
+            <ScreenHeader title="Мероприятие" back={() => go(null)} />
+            <p className="screen-content" role="status">
+              Загружаем мероприятие…
+            </p>
+          </m.section>
+        )}
+      </AnimatePresence>
+
+      <BottomSheet
+        open={categoryPicker}
+        onClose={() => setCategoryPicker(false)}
+        title="Выбор категории"
+        className="category-sheet"
+      >
+        <h2>Категория</h2>
+        <div className="category-grid">
+          {eventCategories.map((item) => (
+            <button
+              type="button"
+              className={category === item.value ? "selected" : ""}
+              key={item.value}
+              onClick={() => {
+                setCategory(item.value);
+                setCategoryManual(true);
+                persistDraft({ category: item.value, categoryManual: true });
+                setCategoryPicker(false);
+              }}
+            >
+              <EventCategoryIcon category={item.value} />
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      </BottomSheet>
+      <BottomSheet
+        open={eventPanel !== null}
+        onClose={() => {
+          setEventPanel(null);
+          setConfirm(null);
+        }}
+        title="Меню мероприятия"
+        className="event-menu-sheet"
+      >
+        {renderEventPanel()}
+        {confirm && (
+          <div className="confirmation" role="alert">
+            <h3>
+              {confirm === "leave"
+                ? "Выйти из мероприятия?"
+                : confirm === "rotate"
+                  ? "Заменить ссылку?"
+                  : "Отключить приглашение?"}
+            </h3>
+            <p>
+              {confirm === "leave"
+                ? "Для возвращения понадобится действующая ссылка."
+                : "Старая ссылка перестанет принимать новых участников."}
+            </p>
+            <div className="actions">
+              <button disabled={busy} onClick={() => change(confirm)}>
+                Подтвердить
+              </button>
+              <button className="secondary" onClick={() => setConfirm(null)}>
+                Отмена
+              </button>
+            </div>
+          </div>
+        )}
+      </BottomSheet>
+
+      {pendingMutation && !busy && (
+        <div className="pending-toast" role="status">
+          <span>Есть незавершённое действие</span>
+          <button
+            onClick={() =>
+              void submitMutation(
+                pendingMutation,
+                pendingMutation.action === "create" ? null : eventId,
+                pendingMutation.action === "create"
+                  ? "event-create"
+                  : "event-mutation",
+                (result) => {
+                  if (pendingMutation.action === "create") {
+                    const id = String(result.eventId);
+                    const invitationToken =
+                      typeof result.invitation === "string"
+                        ? result.invitation
+                        : "";
+                    setCreated({
+                      id,
+                      title,
+                      category,
+                      eventDate: eventDate || null,
+                      link: invitationToken
+                        ? invitationLink(invitationToken)
+                        : "",
+                    });
+                    setCreating(false);
+                  } else {
+                    setRevision((value) => value + 1);
+                  }
+                },
+              )
+            }
+          >
+            Повторить
+          </button>
+        </div>
       )}
     </main>
   );
